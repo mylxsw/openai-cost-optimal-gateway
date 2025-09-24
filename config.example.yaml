@@ -1,34 +1,74 @@
+# Comprehensive configuration example that demonstrates:
+# - Server tuning (listen/debug) and multiple gateway API keys
+# - Heterogeneous providers (OpenAI, Azure, Anthropic, Cloudflare proxy) with custom headers and per-provider timeouts
+# - Logical models with provider preference, round-robin defaults, and rule-based overrides using both array and map syntaxes
+# - Rule expressions accessing TokenCount/Model/Path to reroute traffic and rewrite downstream model IDs
 listen: 0.0.0.0:8000
-debug: false
+debug: true
 
 api_keys:
-  - sk-your-gateway-api-key
+  - sk-admin-gateway-key
+  - sk-readonly-gateway-key
 
 providers:
   - id: openai-official
+    type: openai
     base_url: https://api.openai.com/v1
     access_token: sk-openai-access-token
-  - id: openai-third
-    base_url: https://api.example.com/v1
-    access_token: sk-third-party
-  - id: azure
-    base_url: https://api.azure.com/v1
-    access_token: sk-azure
+    headers:
+      OpenAI-Organization: example-org
+    timeout: 60s
+  - id: reseller-gpt4o
+    base_url: https://api.reseller.com/v1
+    access_token: sk-reseller-access-token
+    headers:
+      X-Client-ID: gateway
+    timeout: 30s
+  - id: azure-gpt4o
+    base_url: https://my-azure-openai.openai.azure.com/openai
+    access_token: sk-azure-access-token
+    headers:
+      api-key: sk-azure-access-token
+      x-ms-client-request-id: gateway-demo
+    timeout: 45s
+  - id: anthropic-claude
+    type: anthropic
+    base_url: https://api.anthropic.com/v1
+    access_token: sk-anthropic-access-token
+    headers:
+      anthropic-version: "2023-06-01"
+    timeout: 30s
   - id: cloudflare-proxy
     base_url: https://api.cloudflare.com/v1
-    access_token: sk-cloudflare
+    access_token: sk-cloudflare-access-token
 
 models:
   - model: gpt-4o
     providers:
       - openai-official
-      - openai-third
+      - azure-gpt4o
+      - reseller-gpt4o
     rules:
-      - rule: TokenCount > 4096
+      - rule: TokenCount > 12000
         providers:
-          azure: ""
-          cloudflare-proxy: "openai/gpt-4o"
-      - rule: TokenCount > 10000
+          - id: azure-gpt4o
+            model: gpt-4o
+          - id: reseller-gpt4o
+            model: openai/gpt-4o-mini
+      - rule: TokenCount > 18000
         providers:
-          - id: cloudflare-proxy
+          anthropic-claude: claude-3-5-sonnet
+          cloudflare-proxy: openai/gpt-4o-mini
+  - model: claude-3-5-sonnet
+    providers:
+      - anthropic-claude
+      - openai-official
+    rules:
+      - rule: Path == "/v1/chat/completions"
+        providers:
+          - id: openai-official
+            model: gpt-4o-mini
+      - rule: Model == "claude-3-5-sonnet" && TokenCount < 2000
+        providers:
+          - id: reseller-gpt4o
             model: openai/gpt-4o-mini
