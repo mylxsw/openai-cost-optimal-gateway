@@ -1,22 +1,26 @@
+# build stage
 FROM golang:1.24 AS builder
-WORKDIR /workspace
+ARG TARGETOS
+ARG TARGETARCH
+ENV GOPROXY=https://goproxy.io,direct
+WORKDIR /data
+
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 
-# Allow dependencies to be downloaded using the default Go module proxy.
-# This keeps the build working in environments where external access is
-# permitted, while still letting callers override the proxy via build args.
-ARG GOPROXY=https://proxy.golang.org,direct
-ARG GOSUMDB=sum.golang.org
-ENV GOPROXY=${GOPROXY} \
-    GOSUMDB=${GOSUMDB}
+RUN go build -ldflags "-s -w" -o /data/bin/gateway cmd/gateway/main.go
 
-RUN go build -o /gateway ./cmd/gateway
+# final stage
+FROM ubuntu:22.04
 
-FROM alpine:3.19
-RUN addgroup -S gateway && adduser -S gateway -G gateway
-USER gateway
-WORKDIR /app
-COPY --from=builder /gateway /usr/local/bin/gateway
+ENV TZ=Asia/Shanghai
+
+RUN apt-get -y update && DEBIAN_FRONTEND="nointeractive" apt install -y tzdata ca-certificates --no-install-recommends && rm -r /var/lib/apt/lists/*
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+WORKDIR /data
+COPY --from=builder /data/bin/gateway /usr/local/bin/
 EXPOSE 8000
-ENTRYPOINT ["/usr/local/bin/gateway"]
-CMD ["-config", "/app/config.yaml"]
+
+ENTRYPOINT ["/usr/local/bin/gateway", "-conf", "/data/config.yaml"]
