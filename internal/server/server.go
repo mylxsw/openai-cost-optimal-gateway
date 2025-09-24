@@ -3,10 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 
+	"github.com/mylxsw/asteria/log"
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/config"
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/gateway"
 	internalmw "github.com/mylxsw/openai-cost-optimal-gateway/internal/middleware"
@@ -40,11 +40,11 @@ func (s *Server) Run(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.httpSrv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("http server shutdown: %v", err)
+			log.Errorf("http server shutdown: %v", err)
 		}
 	}()
 
-	log.Printf("listening on %s", s.cfg.Listen)
+	log.Infof("listening on %s", s.cfg.Listen)
 	err := s.httpSrv.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil
@@ -121,7 +121,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		duration := time.Since(start)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, duration)
+		log.Debugf("%s %s %s", r.Method, r.URL.Path, duration)
 	})
 }
 
@@ -129,7 +129,7 @@ func recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("panic recovered: %v", rec)
+				log.Errorf("panic recovered: %v", rec)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
 		}()

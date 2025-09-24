@@ -22,6 +22,7 @@ type Config struct {
 	APIKeys   []string         `json:"api_keys" yaml:"api_keys"`
 	Providers []ProviderConfig `json:"providers" yaml:"providers"`
 	Models    []ModelConfig    `json:"models" yaml:"models"`
+	Debug     bool             `json:"debug" yaml:"debug"`
 }
 
 type ProviderConfig struct {

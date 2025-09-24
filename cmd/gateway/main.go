@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
 	"os/signal"
 	"syscall"
 
+	"github.com/mylxsw/asteria/log"
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/config"
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/gateway"
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/server"
@@ -18,12 +18,22 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		log.Errorf("load config: %v", err)
+		return
 	}
+
+	// Initialize logging with debug configuration
+	if cfg.Debug {
+		log.DefaultWithFileLine(true)
+		log.Debug("Debug logging enabled")
+	}
+
+	log.Infof("Starting OpenAI Cost Optimal Gateway on %s", cfg.Listen)
 
 	gw, err := gateway.New(cfg)
 	if err != nil {
-		log.Fatalf("init gateway: %v", err)
+		log.Errorf("init gateway: %v", err)
+		return
 	}
 
 	srv := server.New(cfg, gw)
@@ -32,6 +42,7 @@ func main() {
 	defer stop()
 
 	if err := srv.Run(ctx); err != nil {
-		log.Fatalf("server exited with error: %v", err)
+		log.Errorf("server exited with error: %v", err)
+		return
 	}
 }
