@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/example/openai-cost-optimal-gateway/internal/config"
-	"github.com/example/openai-cost-optimal-gateway/internal/gateway"
-	internalmw "github.com/example/openai-cost-optimal-gateway/internal/middleware"
+	"github.com/mylxsw/openai-cost-optimal-gateway/internal/config"
+	"github.com/mylxsw/openai-cost-optimal-gateway/internal/gateway"
+	internalmw "github.com/mylxsw/openai-cost-optimal-gateway/internal/middleware"
 )
 
 type Server struct {

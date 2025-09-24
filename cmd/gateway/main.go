@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/example/openai-cost-optimal-gateway/internal/config"
-	"github.com/example/openai-cost-optimal-gateway/internal/gateway"
-	"github.com/example/openai-cost-optimal-gateway/internal/server"
+	"github.com/mylxsw/openai-cost-optimal-gateway/internal/config"
+	"github.com/mylxsw/openai-cost-optimal-gateway/internal/gateway"
+	"github.com/mylxsw/openai-cost-optimal-gateway/internal/server"
 )
 
 func main() {

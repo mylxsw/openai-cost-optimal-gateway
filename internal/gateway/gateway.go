@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,7 +19,7 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
-	"github.com/example/openai-cost-optimal-gateway/internal/config"
+	"github.com/mylxsw/openai-cost-optimal-gateway/internal/config"
 )
 
 type RequestType int
@@ -87,7 +88,7 @@ func New(cfg *config.Config) (*Gateway, error) {
 	for _, m := range cfg.Models {
 		mr := &modelRoute{config: m}
 		for _, r := range m.Rules {
-			program, err := expr.Compile(r.Expression, expr.Env(EvalEnv{}))
+			program, err := expr.Compile(r.Expression, expr.Env(EvalEnv{}), expr.AsBool())
 			if err != nil {
 				return nil, fmt.Errorf("compile rule %s for model %s: %w", r.Expression, m.Name, err)
 			}
@@ -138,11 +139,15 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 
 	tokenCount := CountTokens(modelName, reqType, bodyBytes)
 
+	log.Printf("model: %s, token count: %d, path: %s", modelName, tokenCount, r.URL.Path)
+
 	candidates := g.selectProviders(route, modelName, tokenCount, r.URL.Path)
 	if len(candidates) == 0 {
 		http.Error(w, "no provider available", http.StatusBadGateway)
 		return
 	}
+
+	log.Printf("select providers: %v", candidates)
 
 	var lastErr error
 	for _, candidate := range candidates {
@@ -223,6 +228,10 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 		}
 	}
 
+	log.Printf("forward request to %s, method: %s, url: %s", provider.ID, r.Method, endpoint)
+	log.Printf("request body: %s", string(body))
+	log.Printf("request headers: %v", req.Header)
+
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("forward request to %s: %w", provider.ID, err)
@@ -256,8 +265,11 @@ func (g *Gateway) selectProviders(route *modelRoute, model string, tokenCount in
 	for _, rule := range route.rules {
 		out, err := vm.Run(rule.program, env)
 		if err != nil {
+			log.Printf("eval rule %v", err)
 			continue
 		}
+
+		log.Printf("rule %s result: %v", rule.program.Source(), out)
 		if matched, ok := out.(bool); ok && matched {
 			return rule.providers
 		}
@@ -413,9 +425,6 @@ func tokenLen(enc *tiktoken.Tiktoken, text string) int {
 	if text == "" {
 		return 0
 	}
-	tokens, err := enc.Encode(text, nil, nil)
-	if err != nil {
-		return 0
-	}
+	tokens := enc.Encode(text, nil, nil)
 	return len(tokens)
 }
