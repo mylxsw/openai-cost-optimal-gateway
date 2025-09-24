@@ -1,0 +1,33 @@
+listen: 0.0.0.0:8000
+
+api_keys:
+  - sk-your-gateway-api-key
+
+providers:
+  - id: openai-official
+    base_url: https://api.openai.com/v1
+    access_token: sk-openai-access-token
+  - id: openai-third
+    base_url: https://api.example.com/v1
+    access_token: sk-third-party
+  - id: azure
+    base_url: https://api.azure.com/v1
+    access_token: sk-azure
+  - id: cloudflare-proxy
+    base_url: https://api.cloudflare.com/v1
+    access_token: sk-cloudflare
+
+models:
+  - model: gpt-4o
+    providers:
+      - openai-official
+      - openai-third
+    rules:
+      - rule: TokenCount > 4096
+        providers:
+          azure: ""
+          cloudflare-proxy: "openai/gpt-4o"
+      - rule: TokenCount > 10000
+        providers:
+          - id: cloudflare-proxy
+            model: openai/gpt-4o-mini
