@@ -22,7 +22,7 @@ type Config struct {
 	APIKeys   []string         `json:"api_keys" yaml:"api_keys"`
 	Providers []ProviderConfig `json:"providers" yaml:"providers"`
 	Models    []ModelConfig    `json:"models" yaml:"models"`
-	Default   string           `json:"default_provider" yaml:"default-provider"`
+	Default   string           `json:"default_provider" yaml:"default_provider"`
 	Debug     bool             `json:"debug" yaml:"debug"`
 }
 
@@ -56,8 +56,8 @@ type RuleConfig struct {
 type ProviderOverrideConfig []ProviderOverride
 
 type ProviderOverride struct {
-	ID    string `json:"id" yaml:"id"`
-	Model string `json:"model" yaml:"model"`
+	Provider string `json:"provider" yaml:"provider"`
+	Model    string `json:"model" yaml:"model"`
 }
 
 func Load(path string) (*Config, error) {
@@ -136,11 +136,11 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("model %s rule %s must specify providers", m.Name, r.Expression)
 			}
 			for _, override := range r.Providers {
-				if override.ID == "" {
-					return fmt.Errorf("model %s rule %s provider id is required", m.Name, r.Expression)
+				if override.Provider == "" {
+					return fmt.Errorf("model %s rule %s provider is required", m.Name, r.Expression)
 				}
-				if _, ok := providers[override.ID]; !ok {
-					return fmt.Errorf("model %s rule %s references unknown provider %s", m.Name, r.Expression, override.ID)
+				if _, ok := providers[override.Provider]; !ok {
+					return fmt.Errorf("model %s rule %s references unknown provider %s", m.Name, r.Expression, override.Provider)
 				}
 			}
 		}
@@ -193,7 +193,7 @@ func (p *ProviderOverrideConfig) UnmarshalJSON(data []byte) error {
 	sort.Strings(keys)
 	result := make([]ProviderOverride, 0, len(keys))
 	for _, k := range keys {
-		result = append(result, ProviderOverride{ID: k, Model: obj[k]})
+		result = append(result, ProviderOverride{Provider: k, Model: obj[k]})
 	}
 	*p = result
 	return nil

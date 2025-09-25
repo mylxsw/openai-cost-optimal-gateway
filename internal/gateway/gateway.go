@@ -101,7 +101,7 @@ func New(cfg *config.Config) (*Gateway, error) {
 			}
 			var providers []ruleProvider
 			for _, override := range r.Providers {
-				providers = append(providers, ruleProvider{id: override.ID, model: override.Model})
+				providers = append(providers, ruleProvider{id: override.Provider, model: override.Model})
 			}
 			mr.rules = append(mr.rules, compiledRule{program: program, providers: providers})
 		}

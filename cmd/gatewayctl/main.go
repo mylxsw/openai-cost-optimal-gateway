@@ -189,7 +189,7 @@ func runPreview(args []string) error {
 		for _, rule := range m.Rules {
 			fmt.Printf("      - when %s\n", rule.Expression)
 			for _, override := range rule.Providers {
-				fmt.Printf("          -> %s", override.ID)
+				fmt.Printf("          -> %s", override.Provider)
 				if override.Model != "" {
 					fmt.Printf(" (as %s)", override.Model)
 				}
@@ -410,7 +410,7 @@ func marshalConfig(cfg *config.Config) (string, error) {
 					if len(rule.Providers) > 0 {
 						writeLine(&b, "        providers:")
 						for _, override := range rule.Providers {
-							writeLine(&b, "          - id: %s", quoteString(override.ID))
+							writeLine(&b, "          - provider: %s", quoteString(override.Provider))
 							if override.Model != "" {
 								writeLine(&b, "            model: %s", quoteString(override.Model))
 							}
