@@ -22,6 +22,7 @@ type Config struct {
 	APIKeys   []string         `json:"api_keys" yaml:"api_keys"`
 	Providers []ProviderConfig `json:"providers" yaml:"providers"`
 	Models    []ModelConfig    `json:"models" yaml:"models"`
+	Default   string           `json:"default_provider" yaml:"default-provider"`
 	Debug     bool             `json:"debug" yaml:"debug"`
 }
 
@@ -35,9 +36,16 @@ type ProviderConfig struct {
 }
 
 type ModelConfig struct {
-	Name      string       `json:"model" yaml:"model"`
-	Providers []string     `json:"providers" yaml:"providers"`
-	Rules     []RuleConfig `json:"rules" yaml:"rules"`
+	Name      string         `json:"model" yaml:"model"`
+	Providers ModelProviders `json:"providers" yaml:"providers"`
+	Rules     []RuleConfig   `json:"rules" yaml:"rules"`
+}
+
+type ModelProviders []ModelProvider
+
+type ModelProvider struct {
+	ID    string `json:"provider" yaml:"provider"`
+	Model string `json:"model" yaml:"model"`
 }
 
 type RuleConfig struct {
@@ -112,9 +120,12 @@ func (c *Config) Validate() error {
 		if len(m.Providers) == 0 {
 			return fmt.Errorf("model %s must have at least one provider", m.Name)
 		}
-		for _, pid := range m.Providers {
-			if _, ok := providers[pid]; !ok {
-				return fmt.Errorf("model %s references unknown provider %s", m.Name, pid)
+		for _, provider := range m.Providers {
+			if provider.ID == "" {
+				return fmt.Errorf("model %s provider id is required", m.Name)
+			}
+			if _, ok := providers[provider.ID]; !ok {
+				return fmt.Errorf("model %s references unknown provider %s", m.Name, provider.ID)
 			}
 		}
 		for _, r := range m.Rules {
@@ -135,6 +146,32 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.Default != "" {
+		if _, ok := providers[c.Default]; !ok {
+			return fmt.Errorf("default provider %s not found", c.Default)
+		}
+	}
+
+	return nil
+}
+
+func (m *ModelProviders) UnmarshalJSON(data []byte) error {
+	var obj []ModelProvider
+	if err := json.Unmarshal(data, &obj); err == nil {
+		*m = obj
+		return nil
+	}
+
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err != nil {
+		return err
+	}
+
+	providers := make([]ModelProvider, 0, len(arr))
+	for _, id := range arr {
+		providers = append(providers, ModelProvider{ID: id})
+	}
+	*m = providers
 	return nil
 }
 
