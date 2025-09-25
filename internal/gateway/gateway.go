@@ -162,13 +162,13 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	route, ok := g.models[modelName]
 	if !ok {
 		if g.defaultProvider != nil {
-			if err := g.forwardRequest(w, r, *g.defaultProvider, bodyBytes); err != nil {
-				log.Errorf("forward to default provider: %v", err)
+			if fwdErr := g.forwardRequest(w, r, *g.defaultProvider, bodyBytes); fwdErr != nil {
+				log.Errorf("forward to default provider: %v", fwdErr)
 				status := http.StatusBadGateway
 				if errors.Is(err, errShouldRetry) {
-					http.Error(w, err.Error(), status)
+					http.Error(w, fwdErr.Error(), status)
 				} else {
-					http.Error(w, fmt.Sprintf("forward to default provider: %v", err), status)
+					http.Error(w, fmt.Sprintf("forward to default provider: %v", fwdErr), status)
 				}
 				return
 			}
