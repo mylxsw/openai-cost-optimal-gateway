@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -162,7 +163,7 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	route, ok := g.models[modelName]
 	if !ok {
 		if g.defaultProvider != nil {
-			if fwdErr := g.forwardRequest(w, r, *g.defaultProvider, bodyBytes); fwdErr != nil {
+			if fwdErr := g.forwardRequest(w, r, *g.defaultProvider, modelName, bodyBytes); fwdErr != nil {
 				log.Errorf("forward to default provider: %v", fwdErr)
 				status := http.StatusBadGateway
 				if errors.Is(fwdErr, errShouldRetry) {
@@ -200,24 +201,23 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 		if candidate.model != "" {
 			targetModel = candidate.model
 		}
+
 		modifiedBody := bodyBytes
 		if targetModel != modelName {
-			if reqType == RequestTypeAnthropicMessages {
-				modifiedBody, err = sjson.SetBytes(bodyBytes, "model", targetModel)
-			} else {
-				modifiedBody, err = sjson.SetBytes(bodyBytes, "model", targetModel)
-			}
+			modifiedBody, err = sjson.SetBytes(bodyBytes, "model", targetModel)
 			if err != nil {
 				lastErr = fmt.Errorf("modify request body: %w", err)
 				continue
 			}
 		}
 
-		if err := g.forwardRequest(w, r, provider, modifiedBody); err != nil {
+		if err := g.forwardRequest(w, r, provider, targetModel, modifiedBody); err != nil {
 			lastErr = err
 			if errors.Is(err, errShouldRetry) {
+				log.Warningf("[%s] provider %s(%s) failed, we will try another provider: %v", modelName, candidate.id, candidate.model, err)
 				continue
 			}
+
 			return
 		}
 		return
@@ -227,6 +227,7 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no available provider")
 	}
+
 	var retryErr *retryableError
 	if errors.As(lastErr, &retryErr) {
 		copyResponseHeaders(w.Header(), retryErr.header)
@@ -236,6 +237,7 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 		}
 		return
 	}
+
 	http.Error(w, lastErr.Error(), status)
 }
 
@@ -249,15 +251,31 @@ type retryableError struct {
 }
 
 func (e *retryableError) Error() string {
-	return fmt.Sprintf("provider %s returned status %d: %s", e.providerID, e.status, errShouldRetry.Error())
+	bodyStr := string(e.body)
+	if contentEncoding := e.header.Get("Content-Encoding"); strings.Contains(strings.ToLower(contentEncoding), "gzip") {
+		if decodedBody, err := decodeGzip(e.body); err == nil {
+			bodyStr = string(decodedBody)
+		}
+	}
+
+	return fmt.Sprintf("provider %s returned status %d, body: %s", e.providerID, e.status, bodyStr)
+}
+
+func decodeGzip(data []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(strings.NewReader(string(data)))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
 }
 
 func (e *retryableError) Unwrap() error {
 	return errShouldRetry
 }
 
-func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provider config.ProviderConfig, body []byte) error {
-	endpoint, err := joinURL(provider.BaseURL, r.URL.Path, r.URL.RawQuery)
+func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provider config.ProviderConfig, model string, body []byte) error {
+	endpoint, err := joinURL(provider.BaseURL, strings.TrimPrefix(r.URL.Path, "/v1/"), r.URL.RawQuery)
 	if err != nil {
 		return fmt.Errorf("build provider url: %w", err)
 	}
@@ -291,18 +309,19 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 		}
 	}
 
-	log.Debugf("forward request to %s, url: %s", provider.ID, endpoint)
+	log.Debugf("[%s] forward request to %s, url: %s", model, provider.ID, endpoint)
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("forward request to %s: %w", provider.ID, err)
+		return fmt.Errorf("[%s] forward request to %s: %w", model, provider.ID, err)
 	}
 	defer resp.Body.Close()
 
 	retryable, respBody, err := shouldRetryResponse(resp)
 	if err != nil {
-		return fmt.Errorf("inspect response from %s: %w", provider.ID, err)
+		return fmt.Errorf("[%s] inspect response from %s: %w", model, provider.ID, err)
 	}
+
 	if retryable {
 		return &retryableError{
 			providerID: provider.ID,
@@ -319,52 +338,21 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 	} else {
 		_, err = io.Copy(w, resp.Body)
 	}
+
 	return err
 }
 
 func shouldRetryResponse(resp *http.Response) (bool, []byte, error) {
 	if shouldRetryStatus(resp.StatusCode) {
-		io.Copy(io.Discard, resp.Body)
-		return true, nil, nil
-	}
-
-	switch resp.StatusCode {
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnauthorized:
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return false, nil, fmt.Errorf("read response body: %w", err)
-		}
-		if err := resp.Body.Close(); err != nil {
-			return false, nil, fmt.Errorf("close response body: %w", err)
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(body))
-
-		bodyStr := string(body)
-		switch resp.StatusCode {
-		case http.StatusBadRequest:
-			return true, body, nil
-		case http.StatusNotFound:
-			if strings.Contains(bodyStr, "DeploymentNotFound") {
-				return true, body, nil
-			}
-		default:
-			return true, body, nil
-		}
-		return false, body, nil
+		body, _ := io.ReadAll(resp.Body)
+		return true, body, nil
 	}
 
 	return false, nil, nil
 }
 
 func shouldRetryStatus(status int) bool {
-	if status >= 500 {
-		return true
-	}
-	switch status {
-	case http.StatusTooManyRequests, http.StatusRequestTimeout, http.StatusBadGateway, http.StatusServiceUnavailable:
-		return true
-	}
-	return false
+	return status >= 400
 }
 
 func (g *Gateway) selectProviders(route *modelRoute, model string, tokenCount int, path string) []ruleProvider {
@@ -480,7 +468,7 @@ func copyResponseHeaders(dst, src http.Header) {
 }
 
 func (g *Gateway) fetchProviderModels(provider config.ProviderConfig) ([]ModelInfo, error) {
-	endpoint, err := joinURL(provider.BaseURL, "/v1/models", "")
+	endpoint, err := joinURL(provider.BaseURL, "/models", "")
 	if err != nil {
 		return nil, fmt.Errorf("build provider url: %w", err)
 	}
