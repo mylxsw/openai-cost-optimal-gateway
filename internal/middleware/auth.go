@@ -36,16 +36,16 @@ func (a *APIKeyAuth) Middleware(next http.Handler) http.Handler {
 
 		key := extractAPIKey(r)
 		if key == "" {
-			log.Debugf("Missing API key from %s", r.RemoteAddr)
+			log.Warningf("Missing API key from %s", r.RemoteAddr)
 			writeAuthError(w, http.StatusUnauthorized, "missing api key")
 			return
 		}
 		if _, ok := a.keys[key]; !ok {
-			log.Debugf("Invalid API key from %s", r.RemoteAddr)
+			log.Warningf("Invalid API key from %s", r.RemoteAddr)
 			writeAuthError(w, http.StatusUnauthorized, "invalid api key")
 			return
 		}
-		log.Debugf("Valid API key from %s", r.RemoteAddr)
+
 		next.ServeHTTP(w, r)
 	})
 }

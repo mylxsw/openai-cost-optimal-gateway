@@ -180,15 +180,13 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 
 	tokenCount := CountTokens(modelName, reqType, bodyBytes)
 
-	log.Debugf("model: %s, token count: %d, path: %s", modelName, tokenCount, r.URL.Path)
-
 	candidates := g.selectProviders(route, modelName, tokenCount, r.URL.Path)
 	if len(candidates) == 0 {
 		http.Error(w, "no provider available", http.StatusBadGateway)
 		return
 	}
 
-	log.Debugf("select providers: %v", candidates)
+	log.Debugf("[%s] select providers: %v", modelName, candidates)
 
 	var lastErr error
 	for _, candidate := range candidates {
@@ -269,7 +267,7 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 		}
 	}
 
-	log.Debugf("forward request to %s, method: %s, url: %s", provider.ID, r.Method, endpoint)
+	log.Debugf("forward request to %s, url: %s", provider.ID, endpoint)
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
@@ -304,11 +302,10 @@ func (g *Gateway) selectProviders(route *modelRoute, model string, tokenCount in
 	for _, rule := range route.rules {
 		out, err := vm.Run(rule.program, env)
 		if err != nil {
-			log.Debugf("eval rule %v", err)
+			log.Warningf("eval rule %v", err)
 			continue
 		}
 
-		log.Debugf("rule %s result: %v", rule.program.Source(), out)
 		if matched, ok := out.(bool); ok && matched {
 			return rule.providers
 		}
