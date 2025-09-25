@@ -227,10 +227,34 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no available provider")
 	}
+	var retryErr *retryableError
+	if errors.As(lastErr, &retryErr) {
+		copyResponseHeaders(w.Header(), retryErr.header)
+		w.WriteHeader(retryErr.status)
+		if len(retryErr.body) > 0 {
+			_, _ = w.Write(retryErr.body)
+		}
+		return
+	}
 	http.Error(w, lastErr.Error(), status)
 }
 
 var errShouldRetry = errors.New("should retry")
+
+type retryableError struct {
+	providerID string
+	status     int
+	header     http.Header
+	body       []byte
+}
+
+func (e *retryableError) Error() string {
+	return fmt.Sprintf("provider %s returned status %d: %s", e.providerID, e.status, errShouldRetry.Error())
+}
+
+func (e *retryableError) Unwrap() error {
+	return errShouldRetry
+}
 
 func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provider config.ProviderConfig, body []byte) error {
 	endpoint, err := joinURL(provider.BaseURL, r.URL.Path, r.URL.RawQuery)
@@ -275,53 +299,61 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 	}
 	defer resp.Body.Close()
 
-	retryable, err := shouldRetryResponse(resp)
+	retryable, respBody, err := shouldRetryResponse(resp)
 	if err != nil {
 		return fmt.Errorf("inspect response from %s: %w", provider.ID, err)
 	}
 	if retryable {
-		return fmt.Errorf("provider %s returned status %d: %w", provider.ID, resp.StatusCode, errShouldRetry)
+		return &retryableError{
+			providerID: provider.ID,
+			status:     resp.StatusCode,
+			header:     resp.Header.Clone(),
+			body:       respBody,
+		}
 	}
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	_, err = io.Copy(w, resp.Body)
+	if respBody != nil {
+		_, err = w.Write(respBody)
+	} else {
+		_, err = io.Copy(w, resp.Body)
+	}
 	return err
 }
 
-func shouldRetryResponse(resp *http.Response) (bool, error) {
+func shouldRetryResponse(resp *http.Response) (bool, []byte, error) {
 	if shouldRetryStatus(resp.StatusCode) {
 		io.Copy(io.Discard, resp.Body)
-		return true, nil
+		return true, nil, nil
 	}
 
 	switch resp.StatusCode {
 	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnauthorized:
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return false, fmt.Errorf("read response body: %w", err)
+			return false, nil, fmt.Errorf("read response body: %w", err)
 		}
 		if err := resp.Body.Close(); err != nil {
-			return false, fmt.Errorf("close response body: %w", err)
+			return false, nil, fmt.Errorf("close response body: %w", err)
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 
 		bodyStr := string(body)
 		switch resp.StatusCode {
 		case http.StatusBadRequest:
-			if strings.Contains(bodyStr, "content_filter") {
-				return true, nil
-			}
+			return true, body, nil
 		case http.StatusNotFound:
 			if strings.Contains(bodyStr, "DeploymentNotFound") {
-				return true, nil
+				return true, body, nil
 			}
 		default:
-			return true, nil
+			return true, body, nil
 		}
+		return false, body, nil
 	}
 
-	return false, nil
+	return false, nil, nil
 }
 
 func shouldRetryStatus(status int) bool {
