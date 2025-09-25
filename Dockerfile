@@ -23,4 +23,4 @@ WORKDIR /data
 COPY --from=builder /data/bin/gateway /usr/local/bin/
 EXPOSE 8000
 
-ENTRYPOINT ["/usr/local/bin/gateway", "-conf", "/data/config.yaml"]
+ENTRYPOINT ["/usr/local/bin/gateway", "-config", "/data/config.yaml"]
