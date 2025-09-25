@@ -165,7 +165,7 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 			if fwdErr := g.forwardRequest(w, r, *g.defaultProvider, bodyBytes); fwdErr != nil {
 				log.Errorf("forward to default provider: %v", fwdErr)
 				status := http.StatusBadGateway
-				if errors.Is(err, errShouldRetry) {
+				if errors.Is(fwdErr, errShouldRetry) {
 					http.Error(w, fwdErr.Error(), status)
 				} else {
 					http.Error(w, fmt.Sprintf("forward to default provider: %v", fwdErr), status)
@@ -275,8 +275,11 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 	}
 	defer resp.Body.Close()
 
-	if shouldRetry(resp.StatusCode) {
-		io.Copy(io.Discard, resp.Body)
+	retryable, err := shouldRetryResponse(resp)
+	if err != nil {
+		return fmt.Errorf("inspect response from %s: %w", provider.ID, err)
+	}
+	if retryable {
 		return fmt.Errorf("provider %s returned status %d: %w", provider.ID, resp.StatusCode, errShouldRetry)
 	}
 
@@ -286,7 +289,42 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 	return err
 }
 
-func shouldRetry(status int) bool {
+func shouldRetryResponse(resp *http.Response) (bool, error) {
+	if shouldRetryStatus(resp.StatusCode) {
+		io.Copy(io.Discard, resp.Body)
+		return true, nil
+	}
+
+	switch resp.StatusCode {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnauthorized:
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return false, fmt.Errorf("read response body: %w", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			return false, fmt.Errorf("close response body: %w", err)
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+
+		bodyStr := string(body)
+		switch resp.StatusCode {
+		case http.StatusBadRequest:
+			if strings.Contains(bodyStr, "content_filter") {
+				return true, nil
+			}
+		case http.StatusNotFound:
+			if strings.Contains(bodyStr, "DeploymentNotFound") {
+				return true, nil
+			}
+		default:
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func shouldRetryStatus(status int) bool {
 	if status >= 500 {
 		return true
 	}
