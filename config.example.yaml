@@ -5,6 +5,7 @@
 # - Rule expressions accessing TokenCount/Model/Path to reroute traffic and rewrite downstream model IDs
 listen: 0.0.0.0:8000
 debug: true
+default-provider: openai-official
 
 api_keys:
   - sk-admin-gateway-key
@@ -45,9 +46,11 @@ providers:
 models:
   - model: gpt-4o
     providers:
-      - openai-official
-      - azure-gpt4o
-      - reseller-gpt4o
+      - provider: openai-official
+      - provider: azure-gpt4o
+        model: gpt-4o
+      - provider: reseller-gpt4o
+        model: openai/gpt-4o
     rules:
       - rule: TokenCount > 12000
         providers:
@@ -61,8 +64,8 @@ models:
           cloudflare-proxy: openai/gpt-4o-mini
   - model: claude-3-5-sonnet
     providers:
-      - anthropic-claude
-      - openai-official
+      - provider: anthropic-claude
+      - provider: openai-official
     rules:
       - rule: Path == "/v1/chat/completions"
         providers:

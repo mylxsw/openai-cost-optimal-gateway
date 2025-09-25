@@ -3,13 +3,13 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/expr-lang/expr"
@@ -31,17 +31,17 @@ const (
 )
 
 type Gateway struct {
-	cfg        *config.Config
-	providers  map[string]config.ProviderConfig
-	models     map[string]*modelRoute
-	httpClient *http.Client
-	modelList  []ModelInfo
+	cfg             *config.Config
+	providers       map[string]config.ProviderConfig
+	models          map[string]*modelRoute
+	httpClient      *http.Client
+	modelList       []ModelInfo
+	defaultProvider *config.ProviderConfig
 }
 
 type modelRoute struct {
-	config    config.ModelConfig
-	rules     []compiledRule
-	defaultRR atomic.Uint64
+	config config.ModelConfig
+	rules  []compiledRule
 }
 
 type compiledRule struct {
@@ -84,6 +84,13 @@ func New(cfg *config.Config) (*Gateway, error) {
 		gw.providers[p.ID] = p
 	}
 
+	if cfg.Default != "" {
+		if provider, ok := gw.providers[cfg.Default]; ok {
+			p := provider
+			gw.defaultProvider = &p
+		}
+	}
+
 	created := time.Now().Unix()
 	for _, m := range cfg.Models {
 		mr := &modelRoute{config: m}
@@ -111,9 +118,30 @@ func New(cfg *config.Config) (*Gateway, error) {
 }
 
 func (g *Gateway) ModelList() ModelListResponse {
+	data := make([]ModelInfo, 0, len(g.modelList))
+	seen := make(map[string]struct{}, len(g.modelList))
+	for _, model := range g.modelList {
+		data = append(data, model)
+		seen[model.ID] = struct{}{}
+	}
+
+	if g.defaultProvider != nil {
+		if models, err := g.fetchProviderModels(*g.defaultProvider); err != nil {
+			log.Errorf("fetch default provider models: %v", err)
+		} else {
+			for _, model := range models {
+				if _, ok := seen[model.ID]; ok {
+					continue
+				}
+				data = append(data, model)
+				seen[model.ID] = struct{}{}
+			}
+		}
+	}
+
 	return ModelListResponse{
 		Object: "list",
-		Data:   g.modelList,
+		Data:   data,
 	}
 }
 
@@ -133,6 +161,19 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 
 	route, ok := g.models[modelName]
 	if !ok {
+		if g.defaultProvider != nil {
+			if err := g.forwardRequest(w, r, *g.defaultProvider, bodyBytes); err != nil {
+				log.Errorf("forward to default provider: %v", err)
+				status := http.StatusBadGateway
+				if errors.Is(err, errShouldRetry) {
+					http.Error(w, err.Error(), status)
+				} else {
+					http.Error(w, fmt.Sprintf("forward to default provider: %v", err), status)
+				}
+				return
+			}
+			return
+		}
 		http.Error(w, fmt.Sprintf("model %s not configured", modelName), http.StatusNotFound)
 		return
 	}
@@ -274,14 +315,8 @@ func (g *Gateway) selectProviders(route *modelRoute, model string, tokenCount in
 	}
 
 	providers := make([]ruleProvider, 0, len(route.config.Providers))
-	n := len(route.config.Providers)
-	if n == 0 {
-		return providers
-	}
-	start := int(route.defaultRR.Add(1)-1) % n
-	for i := 0; i < n; i++ {
-		pid := route.config.Providers[(start+i)%n]
-		providers = append(providers, ruleProvider{id: pid, model: ""})
+	for _, provider := range route.config.Providers {
+		providers = append(providers, ruleProvider{id: provider.ID, model: provider.Model})
 	}
 	return providers
 }
@@ -324,6 +359,54 @@ func copyResponseHeaders(dst, src http.Header) {
 			dst.Add(k, v)
 		}
 	}
+}
+
+func (g *Gateway) fetchProviderModels(provider config.ProviderConfig) ([]ModelInfo, error) {
+	endpoint, err := joinURL(provider.BaseURL, "/v1/models", "")
+	if err != nil {
+		return nil, fmt.Errorf("build provider url: %w", err)
+	}
+
+	ctx := context.Background()
+	if provider.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, provider.Timeout)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	if provider.Type == config.ProviderTypeAnthropic {
+		req.Header.Set("x-api-key", provider.AccessToken)
+	} else {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", provider.AccessToken))
+	}
+	if provider.Headers != nil {
+		for k, v := range provider.Headers {
+			req.Header.Set(k, v)
+		}
+	}
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch models from %s: %w", provider.ID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("provider %s returned status %d: %s", provider.ID, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result ModelListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode provider response: %w", err)
+	}
+
+	return result.Data, nil
 }
 
 func CountTokens(model string, reqType RequestType, body []byte) int {
