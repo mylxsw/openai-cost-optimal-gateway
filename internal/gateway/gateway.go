@@ -326,13 +326,64 @@ func joinURL(base, path, rawQuery string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rel, err := url.Parse(path)
-	if err != nil {
-		return "", err
+
+	baseSegments := splitPathSegments(baseURL.Path)
+	reqSegments := splitPathSegments(path)
+
+	// Remove overlapping path segments so that paths like /v1/... are not duplicated
+	// when the provider base URL already ends with /v1.
+	maxOverlap := min(len(baseSegments), len(reqSegments))
+	for overlap := maxOverlap; overlap > 0; overlap-- {
+		if hasSuffixPrefixOverlap(baseSegments, reqSegments, overlap) {
+			reqSegments = reqSegments[overlap:]
+			break
+		}
 	}
-	target := baseURL.ResolveReference(rel)
+
+	merged := append(append([]string(nil), baseSegments...), reqSegments...)
+
+	var joinedPath string
+	if len(merged) > 0 {
+		joinedPath = "/" + strings.Join(merged, "/")
+	}
+
+	target := *baseURL
+	target.Path = joinedPath
+	target.RawPath = ""
 	target.RawQuery = rawQuery
+
 	return target.String(), nil
+}
+
+func splitPathSegments(p string) []string {
+	p = strings.Trim(p, "/")
+	if p == "" {
+		return nil
+	}
+	return strings.Split(p, "/")
+}
+
+func hasSuffixPrefixOverlap(baseSegments, reqSegments []string, overlap int) bool {
+	if overlap == 0 {
+		return true
+	}
+	if overlap > len(baseSegments) || overlap > len(reqSegments) {
+		return false
+	}
+	baseStart := len(baseSegments) - overlap
+	for i := 0; i < overlap; i++ {
+		if baseSegments[baseStart+i] != reqSegments[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func copyHeaders(dst, src http.Header) {
