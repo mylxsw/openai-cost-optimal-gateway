@@ -28,26 +28,36 @@ func NewAPIKeyAuth(keys []string) *APIKeyAuth {
 }
 
 func (a *APIKeyAuth) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(a.keys) == 0 {
+	return a.MiddlewareWithSkipper(nil)(next)
+}
+
+func (a *APIKeyAuth) MiddlewareWithSkipper(skipper func(*http.Request) bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if len(a.keys) == 0 {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if skipper != nil && skipper(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			key := extractAPIKey(r)
+			if key == "" {
+				log.Warningf("Missing API key from %s", r.RemoteAddr)
+				writeAuthError(w, http.StatusUnauthorized, "missing api key")
+				return
+			}
+			if _, ok := a.keys[key]; !ok {
+				log.Warningf("Invalid API key from %s", r.RemoteAddr)
+				writeAuthError(w, http.StatusUnauthorized, "invalid api key")
+				return
+			}
+
 			next.ServeHTTP(w, r)
-			return
-		}
-
-		key := extractAPIKey(r)
-		if key == "" {
-			log.Warningf("Missing API key from %s", r.RemoteAddr)
-			writeAuthError(w, http.StatusUnauthorized, "missing api key")
-			return
-		}
-		if _, ok := a.keys[key]; !ok {
-			log.Warningf("Invalid API key from %s", r.RemoteAddr)
-			writeAuthError(w, http.StatusUnauthorized, "invalid api key")
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
+		})
+	}
 }
 
 func extractAPIKey(r *http.Request) string {

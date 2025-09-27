@@ -83,6 +83,17 @@ cp config.example.yaml config.yaml
 | `/v1/responses` | POST | 代理 OpenAI Assistants Responses 请求。 |
 | `/v1/messages` | POST | 代理 Anthropic Messages 请求。 |
 | `/v1/models` | GET | 返回网关暴露的逻辑模型列表。 |
+| `/usage` | GET | 在启用日志时返回近期的用量记录。 |
+| `/dashboard` | GET | 内嵌的 React 仪表盘，可视化展示用量数据。 |
+
+## 用量统计与仪表盘
+
+在配置中设置 `save_usage: true` 即可为每次代理请求记录 Token 用量。网关通过 `sqlite3` 命令行工具将数据写入 SQLite 数据库，因此需要保证运行环境的 `PATH` 中可以找到 `sqlite3`。默认的 `storage_uri`（例如 `file:usage.db?...`）会在当前目录生成数据库文件。如果指定 `storage_type: mysql`，目前仍会退回到按照 MySQL DSN 生成文件名的 JSON 文件存储。
+
+启用用量记录后，会额外开放两个需要 API Key 授权的管理端点：
+
+- `GET /usage`：返回原始记录以及聚合的 Token 统计。
+- `GET /dashboard`：提供内嵌的 React 仪表盘页面，无需外部静态资源即可查看图表。
 
 ## 开发说明
 

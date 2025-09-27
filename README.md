@@ -83,6 +83,20 @@ The server listens on the configured `listen` address. Clients must include `Aut
 | `/v1/responses` | POST | Proxies OpenAI Assistants Responses requests. |
 | `/v1/messages` | POST | Proxies Anthropic Messages requests. |
 | `/v1/models` | GET | Lists logical models exposed by the gateway. |
+| `/usage` | GET | Returns recent usage records when logging is enabled. |
+| `/dashboard` | GET | Serves the embedded React dashboard that visualizes usage. |
+
+## Usage tracking & dashboard
+
+Set `save_usage: true` in the configuration to persist token counts for each proxied request. The gateway writes records into an
+SQLite database using the `sqlite3` command-line tool, so ensure `sqlite3` is available in `PATH` on the host where the gateway
+runs. The default `storage_uri` of `file:usage.db?...` will create a local database file next to the gateway binary. Specifying `
+storage_type: mysql` continues to fall back to the JSON-based file store that hashes the MySQL DSN into a deterministic filename.
+
+When usage logging is enabled the gateway exposes two administrative endpoints:
+
+- `GET /usage` returns raw records and aggregated token totals (requires a valid API key).
+- `GET /dashboard` serves an embedded React dashboard that visualizes the recent history without any external assets.
 
 ## Development
 

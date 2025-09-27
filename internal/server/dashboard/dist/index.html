@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenAI Cost Optimal Gateway Usage Dashboard</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      .app-container {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px 16px 64px;
+      }
+      .app-header h1 {
+        margin: 0;
+        font-size: 28px;
+        font-weight: 600;
+      }
+      .app-header p {
+        margin: 8px 0 24px;
+        color: #94a3b8;
+      }
+      .control-panel {
+        background: rgba(15, 23, 42, 0.7);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .control-form {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: flex-end;
+      }
+      .control-form label {
+        display: flex;
+        flex-direction: column;
+        font-size: 14px;
+        color: #cbd5f5;
+        flex: 1 1 220px;
+        gap: 6px;
+      }
+      .control-form input,
+      .control-form select {
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        background: rgba(15, 23, 42, 0.8);
+        color: inherit;
+      }
+      .control-form input:focus,
+      .control-form select:focus {
+        outline: none;
+        border-color: #38bdf8;
+        box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.3);
+      }
+      .refresh-button {
+        padding: 10px 18px;
+        border-radius: 999px;
+        border: none;
+        background: linear-gradient(135deg, #38bdf8, #6366f1);
+        color: white;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .refresh-button:hover {
+        filter: brightness(1.05);
+      }
+      .last-updated {
+        font-size: 13px;
+        color: #94a3b8;
+      }
+      .error-banner {
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: rgba(239, 68, 68, 0.16);
+        color: #fecaca;
+      }
+      .summary-section {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .summary-card {
+        background: rgba(15, 23, 42, 0.7);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 16px;
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .summary-label {
+        font-size: 13px;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .summary-value {
+        font-size: 28px;
+        font-weight: 600;
+      }
+      .table-section {
+        background: rgba(15, 23, 42, 0.7);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 16px;
+        overflow: hidden;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 12px 16px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+        text-align: left;
+        font-size: 14px;
+      }
+      th {
+        background: rgba(30, 41, 59, 0.8);
+        color: #cbd5f5;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 12px;
+      }
+      .number-cell {
+        font-variant-numeric: tabular-nums;
+      }
+      .empty-row td {
+        text-align: center;
+        color: #94a3b8;
+        padding: 24px 0;
+      }
+      @media (max-width: 768px) {
+        .app-header h1 {
+          font-size: 22px;
+        }
+        .control-form {
+          flex-direction: column;
+          align-items: stretch;
+        }
+        th,
+        td {
+          padding: 10px 12px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="./assets/index.js"></script>
+  </body>
+</html>

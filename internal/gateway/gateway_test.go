@@ -36,7 +36,7 @@ func TestProxyRetriesProvidersOnServerError(t *testing.T) {
 		},
 	}
 
-	gw, err := New(cfg)
+	gw, err := New(cfg, nil)
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestProxyRetriesProviderOnContentFilter(t *testing.T) {
 		},
 	}
 
-	gw, err := New(cfg)
+	gw, err := New(cfg, nil)
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestProxyRetriesOnBadRequestWithoutSpecialError(t *testing.T) {
 		},
 	}
 
-	gw, err := New(cfg)
+	gw, err := New(cfg, nil)
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestProxyReturnsBadRequestWhenAllProvidersFail(t *testing.T) {
 		},
 	}
 
-	gw, err := New(cfg)
+	gw, err := New(cfg, nil)
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
 	}
