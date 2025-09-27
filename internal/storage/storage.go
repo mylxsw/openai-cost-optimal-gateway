@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -146,12 +147,38 @@ func (s *sqliteStore) QueryUsage(ctx context.Context, limit int) ([]UsageRecord,
 		return nil, fmt.Errorf("query usage records: %w", err)
 	}
 
-	var rows []map[string]any
 	if len(out) == 0 {
 		return nil, nil
 	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("decode usage records: %w", err)
+
+	decoder := json.NewDecoder(bytes.NewReader(out))
+	rows := make([]map[string]any, 0)
+	for {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("decode usage records: %w", err)
+		}
+
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+			continue
+		}
+
+		var chunk []map[string]any
+		if err := json.Unmarshal(trimmed, &chunk); err != nil {
+			// Ignore JSON fragments that are not result sets (e.g., PRAGMA outputs)
+			continue
+		}
+		if len(chunk) == 0 {
+			continue
+		}
+		rows = append(rows, chunk...)
+	}
+	if len(rows) == 0 {
+		return nil, nil
 	}
 
 	records := make([]UsageRecord, 0, len(rows))
