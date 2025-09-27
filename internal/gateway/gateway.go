@@ -154,6 +154,10 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	}
 	_ = r.Body.Close()
 
+	if log.DebugEnabled() {
+		log.Debug("request body: ", string(bodyBytes))
+	}
+
 	modelName := gjson.GetBytes(bodyBytes, "model").String()
 	if modelName == "" {
 		http.Error(w, "model is required", http.StatusBadRequest)
