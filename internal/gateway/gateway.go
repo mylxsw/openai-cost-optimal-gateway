@@ -21,6 +21,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/config"
+	"github.com/mylxsw/openai-cost-optimal-gateway/internal/storage"
 )
 
 type RequestType int
@@ -38,6 +39,7 @@ type Gateway struct {
 	httpClient      *http.Client
 	modelList       []ModelInfo
 	defaultProvider *config.ProviderConfig
+	usageStore      storage.Store
 }
 
 type modelRoute struct {
@@ -73,12 +75,13 @@ type EvalEnv struct {
 	Path       string
 }
 
-func New(cfg *config.Config) (*Gateway, error) {
+func New(cfg *config.Config, usageStore storage.Store) (*Gateway, error) {
 	gw := &Gateway{
 		cfg:        cfg,
 		providers:  make(map[string]config.ProviderConfig),
 		models:     make(map[string]*modelRoute),
 		httpClient: &http.Client{Timeout: 2 * time.Minute},
+		usageStore: usageStore,
 	}
 
 	for _, p := range cfg.Providers {
@@ -154,6 +157,15 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	}
 	_ = r.Body.Close()
 
+	normalized, changed, err := normalizeRequestBody(bodyBytes, reqType)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("normalize request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	if changed {
+		bodyBytes = normalized
+	}
+
 	if log.DebugEnabled() {
 		log.Debug("request body: ", string(bodyBytes))
 	}
@@ -164,10 +176,14 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 		return
 	}
 
+	tokenCount := CountTokens(modelName, reqType, bodyBytes)
+
 	route, ok := g.models[modelName]
 	if !ok {
 		if g.defaultProvider != nil {
-			if fwdErr := g.forwardRequest(w, r, *g.defaultProvider, modelName, bodyBytes); fwdErr != nil {
+			stream := gjson.GetBytes(bodyBytes, "stream").Bool()
+			record, fwdErr := g.forwardRequest(w, r, *g.defaultProvider, modelName, bodyBytes, tokenCount, r.URL.Path, stream)
+			if fwdErr != nil {
 				log.Errorf("forward to default provider: %v", fwdErr)
 				status := http.StatusBadGateway
 				if errors.Is(fwdErr, errShouldRetry) {
@@ -177,13 +193,14 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 				}
 				return
 			}
+			if record != nil {
+				g.saveUsageRecord(r.Context(), *record)
+			}
 			return
 		}
 		http.Error(w, fmt.Sprintf("model %s not configured", modelName), http.StatusNotFound)
 		return
 	}
-
-	tokenCount := CountTokens(modelName, reqType, bodyBytes)
 
 	candidates := g.selectProviders(route, modelName, tokenCount, r.URL.Path)
 	if len(candidates) == 0 {
@@ -194,6 +211,7 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	log.Debugf("[%s] select providers: %v", modelName, candidates)
 
 	var lastErr error
+	stream := gjson.GetBytes(bodyBytes, "stream").Bool()
 	for _, candidate := range candidates {
 		provider, ok := g.providers[candidate.id]
 		if !ok {
@@ -215,7 +233,8 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 			}
 		}
 
-		if err := g.forwardRequest(w, r, provider, targetModel, modifiedBody); err != nil {
+		record, err := g.forwardRequest(w, r, provider, targetModel, modifiedBody, tokenCount, r.URL.Path, stream)
+		if err != nil {
 			lastErr = err
 			if errors.Is(err, errShouldRetry) {
 				log.Warningf("[%s] provider %s(%s) failed, we will try another provider: %v", modelName, candidate.id, candidate.model, err)
@@ -223,6 +242,9 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 			}
 
 			return
+		}
+		if record != nil {
+			g.saveUsageRecord(r.Context(), *record)
 		}
 		return
 	}
@@ -278,10 +300,10 @@ func (e *retryableError) Unwrap() error {
 	return errShouldRetry
 }
 
-func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provider config.ProviderConfig, model string, body []byte) error {
+func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provider config.ProviderConfig, model string, body []byte, tokenCount int, path string, stream bool) (*storage.UsageRecord, error) {
 	endpoint, err := joinURL(provider.BaseURL, strings.TrimPrefix(r.URL.Path, "/v1/"), r.URL.RawQuery)
 	if err != nil {
-		return fmt.Errorf("build provider url: %w", err)
+		return nil, fmt.Errorf("build provider url: %w", err)
 	}
 
 	ctx := r.Context()
@@ -293,7 +315,7 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 
 	req, err := http.NewRequestWithContext(ctx, r.Method, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	copyHeaders(req.Header, r.Header)
@@ -315,19 +337,20 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 
 	log.Debugf("[%s] forward request to %s, url: %s", model, provider.ID, endpoint)
 
+	started := time.Now()
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("[%s] forward request to %s: %w", model, provider.ID, err)
+		return nil, fmt.Errorf("[%s] forward request to %s: %w", model, provider.ID, err)
 	}
 	defer resp.Body.Close()
 
-	retryable, respBody, err := shouldRetryResponse(resp)
-	if err != nil {
-		return fmt.Errorf("[%s] inspect response from %s: %w", model, provider.ID, err)
-	}
+	responseRecord := g.prepareUsageRecord(provider.ID, model, path, tokenCount, resp.StatusCode)
 
-	if retryable {
-		return &retryableError{
+	isEventStream := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
+	var respBody []byte
+	if shouldRetryStatus(resp.StatusCode) {
+		respBody, _ = io.ReadAll(resp.Body)
+		return nil, &retryableError{
 			providerID: provider.ID,
 			status:     resp.StatusCode,
 			header:     resp.Header.Clone(),
@@ -335,24 +358,39 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 		}
 	}
 
+	if !stream && !isEventStream {
+		respBody, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] read response from %s: %w", model, provider.ID, err)
+		}
+	}
+
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if respBody != nil {
-		_, err = w.Write(respBody)
+		if _, err = w.Write(respBody); err != nil {
+			return nil, err
+		}
 	} else {
-		_, err = io.Copy(w, resp.Body)
+		if _, err = io.Copy(w, resp.Body); err != nil {
+			return nil, err
+		}
 	}
 
-	return err
-}
-
-func shouldRetryResponse(resp *http.Response) (bool, []byte, error) {
-	if shouldRetryStatus(resp.StatusCode) {
-		body, _ := io.ReadAll(resp.Body)
-		return true, body, nil
+	if responseRecord != nil {
+		responseRecord.Duration = time.Since(started)
+		if len(respBody) > 0 {
+			prompt, completion := extractUsageTokens(respBody)
+			if prompt > 0 {
+				responseRecord.RequestTokens = prompt
+			}
+			if completion > 0 {
+				responseRecord.ResponseTokens = completion
+			}
+		}
 	}
 
-	return false, nil, nil
+	return responseRecord, nil
 }
 
 func shouldRetryStatus(status int) bool {

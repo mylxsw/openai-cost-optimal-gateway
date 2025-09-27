@@ -125,7 +125,7 @@ func runPreview(args []string) error {
 		return err
 	}
 
-	if _, err := gateway.New(cfg); err != nil {
+	if _, err := gateway.New(cfg, nil); err != nil {
 		return err
 	}
 

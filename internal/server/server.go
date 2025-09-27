@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mylxsw/asteria/log"
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/config"
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/gateway"
 	internalmw "github.com/mylxsw/openai-cost-optimal-gateway/internal/middleware"
+	"github.com/mylxsw/openai-cost-optimal-gateway/internal/storage"
 )
 
 type Server struct {
@@ -17,13 +20,15 @@ type Server struct {
 	gateway *gateway.Gateway
 	auth    *internalmw.APIKeyAuth
 	httpSrv *http.Server
+	usage   storage.Store
 }
 
-func New(cfg *config.Config, gw *gateway.Gateway) *Server {
+func New(cfg *config.Config, gw *gateway.Gateway, usage storage.Store) *Server {
 	return &Server{
 		cfg:     cfg,
 		gateway: gw,
 		auth:    internalmw.NewAPIKeyAuth(cfg.APIKeys),
+		usage:   usage,
 	}
 }
 
@@ -65,7 +70,27 @@ func (s *Server) buildHandler() http.Handler {
 	mux.Handle("/v1/messages", http.HandlerFunc(s.handleAnthropicMessages))
 	mux.Handle("/v1/models", http.HandlerFunc(s.handleModels))
 
-	return chain(mux, s.auth.Middleware, recoverMiddleware, loggingMiddleware)
+	if s.cfg.SaveUsage && s.usage != nil {
+		mux.Handle("/usage", http.HandlerFunc(s.handleUsage))
+		if dashboardHandler := newDashboardHandler(); dashboardHandler != nil {
+			mux.Handle("/dashboard", dashboardHandler)
+			mux.Handle("/dashboard/", dashboardHandler)
+		}
+	}
+
+	return chain(mux, s.auth.MiddlewareWithSkipper(s.shouldSkipAuth), recoverMiddleware, loggingMiddleware)
+}
+
+func (s *Server) shouldSkipAuth(r *http.Request) bool {
+	if r.Method == http.MethodGet {
+		if r.URL.Path == "/healthz" {
+			return true
+		}
+		if strings.HasPrefix(r.URL.Path, "/dashboard") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +125,51 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	response := s.gateway.ModelList()
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	if s.usage == nil {
+		http.Error(w, "usage tracking disabled", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	records, err := s.usage.QueryUsage(r.Context(), limit)
+	if err != nil {
+		http.Error(w, "query usage records: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	summary := usageSummary{}
+	summary.TotalRequests = len(records)
+	for _, rec := range records {
+		summary.TotalPromptTokens += rec.RequestTokens
+		summary.TotalCompletionTokens += rec.ResponseTokens
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(usageResponse{Data: records, Summary: summary})
+}
+
+type usageSummary struct {
+	TotalRequests         int `json:"total_requests"`
+	TotalPromptTokens     int `json:"total_prompt_tokens"`
+	TotalCompletionTokens int `json:"total_completion_tokens"`
+}
+
+type usageResponse struct {
+	Data    []storage.UsageRecord `json:"data"`
+	Summary usageSummary          `json:"summary"`
 }
 
 func methodNotAllowed(w http.ResponseWriter, allowed string) {
