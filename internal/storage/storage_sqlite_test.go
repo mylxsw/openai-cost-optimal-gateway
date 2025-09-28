@@ -21,19 +21,24 @@ func TestSQLiteStoreRecordAndQuery(t *testing.T) {
 	})
 
 	record := UsageRecord{
-		Path:           "/v1/chat/completions",
-		Provider:       "provider-a",
-		Model:          "gpt-4o",
-		RequestTokens:  42,
-		ResponseTokens: 11,
-		Status:         200,
-		Duration:       time.Second,
+		Path:              "/v1/chat/completions",
+		Provider:          "provider-a",
+		Model:             "gpt-4o",
+		OriginalModel:     "gpt-4o",
+		RequestID:         "req-1",
+		Attempt:           1,
+		Outcome:           "success",
+		RequestTokens:     42,
+		ResponseTokens:    11,
+		StatusCode:        200,
+		Duration:          time.Second,
+		FirstTokenLatency: 100 * time.Millisecond,
 	}
 	if err := store.RecordUsage(context.Background(), record); err != nil {
 		t.Fatalf("record usage: %v", err)
 	}
 
-	records, err := store.QueryUsage(context.Background(), 10)
+	records, err := store.QueryUsage(context.Background(), UsageQuery{Limit: 10})
 	if err != nil {
 		t.Fatalf("query usage: %v", err)
 	}
@@ -47,10 +52,19 @@ func TestSQLiteStoreRecordAndQuery(t *testing.T) {
 	if got.RequestTokens != record.RequestTokens || got.ResponseTokens != record.ResponseTokens {
 		t.Fatalf("unexpected tokens: %+v", got)
 	}
-	if got.Status != record.Status {
-		t.Fatalf("unexpected status: %d", got.Status)
+	if got.StatusCode != record.StatusCode {
+		t.Fatalf("unexpected status code: %d", got.StatusCode)
 	}
 	if got.Duration != record.Duration {
 		t.Fatalf("unexpected duration: %s", got.Duration)
+	}
+	if got.Attempt != record.Attempt {
+		t.Fatalf("unexpected attempt: %d", got.Attempt)
+	}
+	if got.FirstTokenLatency != record.FirstTokenLatency {
+		t.Fatalf("unexpected first token latency: %s", got.FirstTokenLatency)
+	}
+	if got.Outcome != record.Outcome {
+		t.Fatalf("unexpected outcome: %s", got.Outcome)
 	}
 }

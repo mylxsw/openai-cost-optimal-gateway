@@ -65,6 +65,16 @@ func (s *Server) buildHandler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	// Handle common static resources
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("User-agent: *\nDisallow: /"))
+	})
+
 	mux.Handle("/v1/chat/completions", http.HandlerFunc(s.handleChatCompletions))
 	mux.Handle("/v1/responses", http.HandlerFunc(s.handleResponses))
 	mux.Handle("/v1/messages", http.HandlerFunc(s.handleAnthropicMessages))
@@ -88,6 +98,17 @@ func (s *Server) shouldSkipAuth(r *http.Request) bool {
 		}
 		if strings.HasPrefix(r.URL.Path, "/dashboard") {
 			return true
+		}
+		// Skip authentication for common static resources
+		staticPaths := []string{
+			"/favicon.ico",
+			"/robots.txt",
+			"/sitemap.xml",
+		}
+		for _, path := range staticPaths {
+			if r.URL.Path == path {
+				return true
+			}
 		}
 	}
 	return false
@@ -144,7 +165,8 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	records, err := s.usage.QueryUsage(r.Context(), limit)
+	requestID := strings.TrimSpace(r.URL.Query().Get("request_id"))
+	records, err := s.usage.QueryUsage(r.Context(), storage.UsageQuery{Limit: limit, RequestID: requestID})
 	if err != nil {
 		http.Error(w, "query usage records: "+err.Error(), http.StatusInternalServerError)
 		return

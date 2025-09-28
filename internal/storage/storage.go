@@ -2,40 +2,54 @@ package storage
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type UsageRecord struct {
-	ID             int64         `json:"id"`
-	CreatedAt      time.Time     `json:"created_at"`
-	Path           string        `json:"path"`
-	Provider       string        `json:"provider"`
-	Model          string        `json:"model"`
-	RequestTokens  int           `json:"request_tokens"`
-	ResponseTokens int           `json:"response_tokens"`
-	Status         int           `json:"status"`
-	Duration       time.Duration `json:"duration"`
+	ID                int64         `json:"id"`
+	CreatedAt         time.Time     `json:"created_at"`
+	Path              string        `json:"path"`
+	Provider          string        `json:"provider"`
+	Model             string        `json:"model"`
+	OriginalModel     string        `json:"original_model"`
+	ProviderRequestID string        `json:"provider_request_id"`
+	RequestID         string        `json:"request_id"`
+	Attempt           int           `json:"attempt"`
+	RequestTokens     int           `json:"request_tokens"`
+	ResponseTokens    int           `json:"response_tokens"`
+	StatusCode        int           `json:"status_code"`
+	Outcome           string        `json:"status"`
+	Duration          time.Duration `json:"duration"`
+	FirstTokenLatency time.Duration `json:"first_token_latency"`
+	Error             string        `json:"error,omitempty"`
+}
+
+type UsageQuery struct {
+	Limit     int
+	RequestID string
 }
 
 type Store interface {
 	RecordUsage(ctx context.Context, record UsageRecord) error
-	QueryUsage(ctx context.Context, limit int) ([]UsageRecord, error)
+	QueryUsage(ctx context.Context, query UsageQuery) ([]UsageRecord, error)
 	Close(ctx context.Context) error
 }
 
 type sqliteStore struct {
+	db      *sql.DB
 	path    string
 	pragmas []string
 }
@@ -89,15 +103,29 @@ func newSQLiteStore(ctx context.Context, uri string) (*sqliteStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := exec.LookPath("sqlite3"); err != nil {
-		return nil, fmt.Errorf("sqlite3 binary not found: %w", err)
-	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create sqlite directory: %w", err)
 	}
 
-	store := &sqliteStore{path: path, pragmas: pragmas}
+	// Build connection string with pragmas
+	connStr := path
+	if len(pragmas) > 0 {
+		params := make([]string, len(pragmas))
+		for i, pragma := range pragmas {
+			params[i] = "_pragma=" + pragma
+		}
+		connStr += "?" + strings.Join(params, "&")
+	}
+
+	db, err := sql.Open("sqlite3", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite database: %w", err)
+	}
+
+	store := &sqliteStore{db: db, path: path, pragmas: pragmas}
 	if err := store.initSchema(ctx); err != nil {
+		db.Close()
 		return nil, err
 	}
 	return store, nil
@@ -110,157 +138,185 @@ func (s *sqliteStore) RecordUsage(ctx context.Context, record UsageRecord) error
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now()
 	}
+	if record.Attempt <= 0 {
+		record.Attempt = 1
+	}
 
-	stmt := fmt.Sprintf(
-		"INSERT INTO usage_records (created_at, path, provider, model, request_tokens, response_tokens, status, duration) VALUES (%s, %s, %s, %s, %d, %d, %d, %d)",
-		quoteSQLiteTime(record.CreatedAt),
-		quoteLiteral(record.Path),
-		quoteLiteral(record.Provider),
-		quoteLiteral(record.Model),
+	query := `INSERT INTO usage_records 
+		(created_at, path, provider, model, original_model, provider_request_id, request_id, attempt, request_tokens, response_tokens, status, outcome, error, duration, first_token_latency) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	_, err := s.db.ExecContext(ctx, query,
+		record.CreatedAt.Format(time.RFC3339Nano),
+		record.Path,
+		record.Provider,
+		record.Model,
+		record.OriginalModel,
+		record.ProviderRequestID,
+		record.RequestID,
+		record.Attempt,
 		record.RequestTokens,
 		record.ResponseTokens,
-		record.Status,
+		record.StatusCode,
+		record.Outcome,
+		record.Error,
 		record.Duration.Nanoseconds(),
+		record.FirstTokenLatency.Nanoseconds(),
 	)
 
-	if _, err := s.runSQLite(ctx, false, stmt); err != nil {
+	if err != nil {
 		return fmt.Errorf("insert usage record: %w", err)
 	}
 	return nil
 }
 
-func (s *sqliteStore) QueryUsage(ctx context.Context, limit int) ([]UsageRecord, error) {
+func (s *sqliteStore) QueryUsage(ctx context.Context, query UsageQuery) ([]UsageRecord, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	limit := query.Limit
 	if limit <= 0 {
 		limit = 100
 	}
 
-	stmt := fmt.Sprintf(
-		"SELECT id, created_at, path, provider, model, request_tokens, response_tokens, status, duration FROM usage_records ORDER BY datetime(created_at) DESC LIMIT %d",
-		limit,
-	)
-	out, err := s.runSQLite(ctx, true, stmt)
+	querySQL := `SELECT id, created_at, path, provider, model, original_model, provider_request_id, request_id, attempt, request_tokens, response_tokens, status, outcome, error, duration, first_token_latency 
+		FROM usage_records`
+	args := []interface{}{}
+
+	if strings.TrimSpace(query.RequestID) != "" {
+		querySQL += " WHERE request_id = ?"
+		args = append(args, query.RequestID)
+	}
+
+	querySQL += " ORDER BY datetime(created_at) DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query usage records: %w", err)
 	}
+	defer rows.Close()
 
-	var rows []map[string]any
-	if len(out) == 0 {
-		return nil, nil
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("decode usage records: %w", err)
+	var records []UsageRecord
+	for rows.Next() {
+		var record UsageRecord
+		var createdAtStr string
+		var durationNs, firstTokenLatencyNs int64
+
+		err := rows.Scan(
+			&record.ID,
+			&createdAtStr,
+			&record.Path,
+			&record.Provider,
+			&record.Model,
+			&record.OriginalModel,
+			&record.ProviderRequestID,
+			&record.RequestID,
+			&record.Attempt,
+			&record.RequestTokens,
+			&record.ResponseTokens,
+			&record.StatusCode,
+			&record.Outcome,
+			&record.Error,
+			&durationNs,
+			&firstTokenLatencyNs,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan usage record: %w", err)
+		}
+
+		// Parse created_at
+		if createdAt, err := time.Parse(time.RFC3339Nano, createdAtStr); err == nil {
+			record.CreatedAt = createdAt
+		}
+
+		// Convert nanoseconds to Duration
+		record.Duration = time.Duration(durationNs)
+		record.FirstTokenLatency = time.Duration(firstTokenLatencyNs)
+
+		// Set default values
+		if record.Attempt <= 0 {
+			record.Attempt = 1
+		}
+		if record.Outcome == "" {
+			if record.StatusCode >= 200 && record.StatusCode < 400 {
+				record.Outcome = "success"
+			} else if record.StatusCode != 0 {
+				record.Outcome = "failure"
+			}
+		}
+
+		records = append(records, record)
 	}
 
-	records := make([]UsageRecord, 0, len(rows))
-	for _, row := range rows {
-		records = append(records, mapToUsageRecord(row))
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usage records: %w", err)
 	}
+
 	return records, nil
 }
 
 func (s *sqliteStore) Close(ctx context.Context) error {
+	if s.db != nil {
+		return s.db.Close()
+	}
 	return nil
 }
 
 func (s *sqliteStore) initSchema(ctx context.Context) error {
-	schema := []string{
-		`CREATE TABLE IF NOT EXISTS usage_records (
+	// Create main table
+	createTableSQL := `CREATE TABLE IF NOT EXISTS usage_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at TEXT NOT NULL,
         path TEXT,
         provider TEXT,
         model TEXT,
+        original_model TEXT,
+        provider_request_id TEXT,
+        request_id TEXT,
+        attempt INTEGER NOT NULL DEFAULT 1,
         request_tokens INTEGER NOT NULL DEFAULT 0,
         response_tokens INTEGER NOT NULL DEFAULT 0,
         status INTEGER NOT NULL DEFAULT 0,
-        duration INTEGER NOT NULL DEFAULT 0
-)`,
-		`CREATE INDEX IF NOT EXISTS idx_usage_records_created_at ON usage_records (created_at DESC)`,
+        outcome TEXT,
+        error TEXT,
+        duration INTEGER NOT NULL DEFAULT 0,
+        first_token_latency INTEGER NOT NULL DEFAULT 0
+    )`
+
+	if _, err := s.db.ExecContext(ctx, createTableSQL); err != nil {
+		return fmt.Errorf("create usage_records table: %w", err)
 	}
-	if _, err := s.runSQLite(ctx, false, schema...); err != nil {
-		return fmt.Errorf("init sqlite schema: %w", err)
+
+	// Create index
+	createIndexSQL := `CREATE INDEX IF NOT EXISTS idx_usage_records_created_at ON usage_records (created_at DESC)`
+	if _, err := s.db.ExecContext(ctx, createIndexSQL); err != nil {
+		return fmt.Errorf("create usage_records index: %w", err)
 	}
+
+	// Try to add columns that might not exist in older schemas
+	alterStatements := []string{
+		"ALTER TABLE usage_records ADD COLUMN original_model TEXT",
+		"ALTER TABLE usage_records ADD COLUMN provider_request_id TEXT",
+		"ALTER TABLE usage_records ADD COLUMN request_id TEXT",
+		"ALTER TABLE usage_records ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE usage_records ADD COLUMN outcome TEXT",
+		"ALTER TABLE usage_records ADD COLUMN error TEXT",
+		"ALTER TABLE usage_records ADD COLUMN first_token_latency INTEGER NOT NULL DEFAULT 0",
+	}
+
+	for _, stmt := range alterStatements {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			errText := strings.ToLower(err.Error())
+			if strings.Contains(errText, "duplicate column name") {
+				continue
+			}
+			return fmt.Errorf("alter usage_records: %w", err)
+		}
+	}
+
 	return nil
-}
-
-func (s *sqliteStore) runSQLite(ctx context.Context, jsonOutput bool, statements ...string) ([]byte, error) {
-	args := []string{}
-	if jsonOutput {
-		args = append(args, "-json")
-	}
-	args = append(args, s.path)
-
-	var script strings.Builder
-	for _, pragma := range s.pragmas {
-		if strings.TrimSpace(pragma) == "" {
-			continue
-		}
-		script.WriteString("PRAGMA ")
-		script.WriteString(pragma)
-		script.WriteString(";\n")
-	}
-	for _, stmt := range statements {
-		trimmed := strings.TrimSpace(stmt)
-		if trimmed == "" {
-			continue
-		}
-		script.WriteString(trimmed)
-		if !strings.HasSuffix(trimmed, ";") {
-			script.WriteString(";")
-		}
-		script.WriteString("\n")
-	}
-
-	cmd := exec.CommandContext(ctx, "sqlite3", args...)
-	cmd.Stdin = strings.NewReader(script.String())
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		return nil, errors.New(errMsg)
-	}
-	return stdout.Bytes(), nil
-}
-
-func mapToUsageRecord(row map[string]any) UsageRecord {
-	var record UsageRecord
-	if v, ok := row["id"].(float64); ok {
-		record.ID = int64(v)
-	}
-	if v, ok := row["created_at"].(string); ok {
-		if parsed, err := parseSQLiteTime(v); err == nil {
-			record.CreatedAt = parsed
-		}
-	}
-	if v, ok := row["path"].(string); ok {
-		record.Path = v
-	}
-	if v, ok := row["provider"].(string); ok {
-		record.Provider = v
-	}
-	if v, ok := row["model"].(string); ok {
-		record.Model = v
-	}
-	if v, ok := row["request_tokens"].(float64); ok {
-		record.RequestTokens = int(v)
-	}
-	if v, ok := row["response_tokens"].(float64); ok {
-		record.ResponseTokens = int(v)
-	}
-	if v, ok := row["status"].(float64); ok {
-		record.Status = int(v)
-	}
-	if v, ok := row["duration"].(float64); ok {
-		record.Duration = time.Duration(int64(v))
-	}
-	return record
 }
 
 func parseSQLiteURI(uri string) (string, []string, error) {
@@ -285,9 +341,8 @@ func parseSQLiteURI(uri string) (string, []string, error) {
 		} else {
 			path = parsed.Opaque
 		}
-		if strings.HasPrefix(path, "//") {
-			path = path[2:]
-		}
+
+		path = strings.TrimPrefix(path, "//")
 		for key, values := range parsed.Query() {
 			if strings.EqualFold(key, "_pragma") {
 				for _, value := range values {
@@ -395,16 +450,23 @@ func (f *fileStore) RecordUsage(_ context.Context, record UsageRecord) error {
 	return nil
 }
 
-func (f *fileStore) QueryUsage(_ context.Context, limit int) ([]UsageRecord, error) {
+func (f *fileStore) QueryUsage(_ context.Context, query UsageQuery) ([]UsageRecord, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
+	limit := query.Limit
 	if limit <= 0 {
 		limit = 100
 	}
 
-	records := make([]UsageRecord, len(f.records))
-	copy(records, f.records)
+	records := make([]UsageRecord, 0, len(f.records))
+	requestID := strings.TrimSpace(query.RequestID)
+	for _, rec := range f.records {
+		if requestID != "" && rec.RequestID != requestID {
+			continue
+		}
+		records = append(records, rec)
+	}
 	sort.Slice(records, func(i, j int) bool {
 		return records[i].CreatedAt.After(records[j].CreatedAt)
 	})
@@ -436,6 +498,16 @@ func (f *fileStore) load() error {
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
 			return fmt.Errorf("decode usage record: %w", err)
 		}
+		if record.Attempt <= 0 {
+			record.Attempt = 1
+		}
+		if record.Outcome == "" {
+			if record.StatusCode >= 200 && record.StatusCode < 400 {
+				record.Outcome = "success"
+			} else if record.StatusCode != 0 {
+				record.Outcome = "failure"
+			}
+		}
 		f.records = append(f.records, record)
 		if record.ID > f.nextID {
 			f.nextID = record.ID
@@ -445,25 +517,6 @@ func (f *fileStore) load() error {
 		return fmt.Errorf("read usage records: %w", err)
 	}
 	return nil
-}
-
-func quoteLiteral(value string) string {
-	escaped := strings.ReplaceAll(value, "'", "''")
-	return "'" + escaped + "'"
-}
-
-func quoteSQLiteTime(t time.Time) string {
-	return quoteLiteral(t.UTC().Format(time.RFC3339Nano))
-}
-
-func parseSQLiteTime(value string) (time.Time, error) {
-	layouts := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05"}
-	for _, layout := range layouts {
-		if parsed, err := time.Parse(layout, value); err == nil {
-			return parsed, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("parse sqlite time: %s", value)
 }
 
 func sanitizeFilename(name string) string {

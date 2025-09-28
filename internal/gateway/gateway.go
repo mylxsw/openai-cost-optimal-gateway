@@ -10,11 +10,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
+	"github.com/google/uuid"
 	"github.com/mylxsw/asteria/log"
 	tiktoken "github.com/pkoukk/tiktoken-go"
 	"github.com/tidwall/gjson"
@@ -177,12 +179,19 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	}
 
 	tokenCount := CountTokens(modelName, reqType, bodyBytes)
+	requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
 
 	route, ok := g.models[modelName]
 	if !ok {
 		if g.defaultProvider != nil {
 			stream := gjson.GetBytes(bodyBytes, "stream").Bool()
-			record, fwdErr := g.forwardRequest(w, r, *g.defaultProvider, modelName, bodyBytes, tokenCount, r.URL.Path, stream)
+			record, fwdErr := g.forwardRequest(w, r, *g.defaultProvider, modelName, bodyBytes, tokenCount, r.URL.Path, stream, reqType, 1, requestID, modelName)
+			if record != nil {
+				g.saveUsageRecord(r.Context(), *record)
+			}
 			if fwdErr != nil {
 				log.Errorf("forward to default provider: %v", fwdErr)
 				status := http.StatusBadGateway
@@ -192,9 +201,6 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 					http.Error(w, fmt.Sprintf("forward to default provider: %v", fwdErr), status)
 				}
 				return
-			}
-			if record != nil {
-				g.saveUsageRecord(r.Context(), *record)
 			}
 			return
 		}
@@ -212,10 +218,19 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 
 	var lastErr error
 	stream := gjson.GetBytes(bodyBytes, "stream").Bool()
-	for _, candidate := range candidates {
+	for attemptIdx, candidate := range candidates {
+		attempt := attemptIdx + 1
 		provider, ok := g.providers[candidate.id]
 		if !ok {
-			lastErr = fmt.Errorf("provider %s not found", candidate.id)
+			err := fmt.Errorf("provider %s not found", candidate.id)
+			lastErr = err
+			if rec := g.prepareUsageRecord(candidate.id, candidate.model, modelName, r.URL.Path, requestID, tokenCount, 0, attempt); rec != nil {
+				rec.Outcome = "failure"
+				rec.Error = err.Error()
+				rec.Duration = 0
+				rec.FirstTokenLatency = 0
+				g.saveUsageRecord(r.Context(), *rec)
+			}
 			continue
 		}
 
@@ -229,22 +244,27 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 			modifiedBody, err = sjson.SetBytes(bodyBytes, "model", targetModel)
 			if err != nil {
 				lastErr = fmt.Errorf("modify request body: %w", err)
+				if rec := g.prepareUsageRecord(provider.ID, targetModel, modelName, r.URL.Path, requestID, tokenCount, 0, attempt); rec != nil {
+					rec.Outcome = "failure"
+					rec.Error = err.Error()
+					rec.Duration = 0
+					g.saveUsageRecord(r.Context(), *rec)
+				}
 				continue
 			}
 		}
 
-		record, err := g.forwardRequest(w, r, provider, targetModel, modifiedBody, tokenCount, r.URL.Path, stream)
+		record, err := g.forwardRequest(w, r, provider, targetModel, modifiedBody, tokenCount, r.URL.Path, stream, reqType, attempt, requestID, modelName)
+		if record != nil {
+			g.saveUsageRecord(r.Context(), *record)
+		}
 		if err != nil {
 			lastErr = err
 			if errors.Is(err, errShouldRetry) {
 				log.Warningf("[%s] provider %s(%s) failed, we will try another provider: %v", modelName, candidate.id, candidate.model, err)
 				continue
 			}
-
 			return
-		}
-		if record != nil {
-			g.saveUsageRecord(r.Context(), *record)
 		}
 		return
 	}
@@ -288,7 +308,7 @@ func (e *retryableError) Error() string {
 }
 
 func decodeGzip(data []byte) ([]byte, error) {
-	reader, err := gzip.NewReader(strings.NewReader(string(data)))
+	reader, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -300,10 +320,19 @@ func (e *retryableError) Unwrap() error {
 	return errShouldRetry
 }
 
-func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provider config.ProviderConfig, model string, body []byte, tokenCount int, path string, stream bool) (*storage.UsageRecord, error) {
+func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provider config.ProviderConfig, model string, body []byte, tokenCount int, path string, stream bool, reqType RequestType, attempt int, requestID, originalModel string) (*storage.UsageRecord, error) {
 	endpoint, err := joinURL(provider.BaseURL, strings.TrimPrefix(r.URL.Path, "/v1/"), r.URL.RawQuery)
+	record := g.prepareUsageRecord(provider.ID, model, originalModel, path, requestID, tokenCount, 0, attempt)
+	started := time.Now()
+	if record != nil {
+		record.CreatedAt = started
+	}
 	if err != nil {
-		return nil, fmt.Errorf("build provider url: %w", err)
+		if record != nil {
+			record.Outcome = "failure"
+			record.Error = err.Error()
+		}
+		return record, fmt.Errorf("build provider url: %w", err)
 	}
 
 	ctx := r.Context()
@@ -315,7 +344,11 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 
 	req, err := http.NewRequestWithContext(ctx, r.Method, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		if record != nil {
+			record.Outcome = "failure"
+			record.Error = err.Error()
+		}
+		return record, fmt.Errorf("create request: %w", err)
 	}
 
 	copyHeaders(req.Header, r.Header)
@@ -337,20 +370,41 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 
 	log.Debugf("[%s] forward request to %s, url: %s", model, provider.ID, endpoint)
 
-	started := time.Now()
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("[%s] forward request to %s: %w", model, provider.ID, err)
+		if record != nil {
+			record.Outcome = "failure"
+			record.Error = err.Error()
+			record.Duration = time.Since(started)
+		}
+		return record, fmt.Errorf("[%s] forward request to %s: %w", model, provider.ID, err)
 	}
 	defer resp.Body.Close()
 
-	responseRecord := g.prepareUsageRecord(provider.ID, model, path, tokenCount, resp.StatusCode)
+	isEventStream := isEventStreamResponse(resp.Header)
+	if record != nil {
+		record.StatusCode = resp.StatusCode
+	}
 
-	isEventStream := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
-	var respBody []byte
+	tracker := newFirstByteReader(resp.Body, started)
+
 	if shouldRetryStatus(resp.StatusCode) {
-		respBody, _ = io.ReadAll(resp.Body)
-		return nil, &retryableError{
+		respBody, _ := io.ReadAll(tracker)
+		if record != nil {
+			record.Duration = time.Since(started)
+			record.FirstTokenLatency = tracker.Latency()
+			record.Outcome = "failure"
+			record.Error = shortenErrorMessage(extractErrorMessage(respBody, resp.Header.Get("Content-Encoding"), resp.StatusCode))
+			decoded := decodeBodyForAnalysis(respBody, resp.Header.Get("Content-Encoding"))
+			providerReqID, completion := extractResponseMetadata(model, reqType, decoded, stream || isEventStream)
+			if providerReqID != "" {
+				record.ProviderRequestID = providerReqID
+			}
+			if completion > 0 {
+				record.ResponseTokens = completion
+			}
+		}
+		return record, &retryableError{
 			providerID: provider.ID,
 			status:     resp.StatusCode,
 			header:     resp.Header.Clone(),
@@ -358,43 +412,395 @@ func (g *Gateway) forwardRequest(w http.ResponseWriter, r *http.Request, provide
 		}
 	}
 
-	if !stream && !isEventStream {
-		respBody, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("[%s] read response from %s: %w", model, provider.ID, err)
-		}
-	}
-
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if respBody != nil {
-		if _, err = w.Write(respBody); err != nil {
-			return nil, err
+
+	var respBody []byte
+	if stream || isEventStream {
+		var buf bytes.Buffer
+		writer := io.MultiWriter(w, &buf)
+		if _, err = io.Copy(writer, tracker); err != nil {
+			if record != nil {
+				record.Outcome = "failure"
+				record.Error = err.Error()
+				record.Duration = time.Since(started)
+				record.FirstTokenLatency = tracker.Latency()
+			}
+			return record, fmt.Errorf("[%s] stream response from %s: %w", model, provider.ID, err)
 		}
+		respBody = buf.Bytes()
 	} else {
-		if _, err = io.Copy(w, resp.Body); err != nil {
-			return nil, err
+		data, readErr := io.ReadAll(tracker)
+		if readErr != nil {
+			if record != nil {
+				record.Outcome = "failure"
+				record.Error = readErr.Error()
+				record.Duration = time.Since(started)
+				record.FirstTokenLatency = tracker.Latency()
+			}
+			return record, fmt.Errorf("[%s] read response from %s: %w", model, provider.ID, readErr)
+		}
+		respBody = data
+		if _, err = w.Write(respBody); err != nil {
+			if record != nil {
+				record.Outcome = "failure"
+				record.Error = err.Error()
+				record.Duration = time.Since(started)
+				record.FirstTokenLatency = tracker.Latency()
+			}
+			return record, err
 		}
 	}
 
-	if responseRecord != nil {
-		responseRecord.Duration = time.Since(started)
-		if len(respBody) > 0 {
-			prompt, completion := extractUsageTokens(respBody)
-			if prompt > 0 {
-				responseRecord.RequestTokens = prompt
-			}
-			if completion > 0 {
-				responseRecord.ResponseTokens = completion
-			}
+	if record != nil {
+		record.Duration = time.Since(started)
+		record.FirstTokenLatency = tracker.Latency()
+		if record.Outcome == "" {
+			record.Outcome = "success"
+		}
+		decoded := decodeBodyForAnalysis(respBody, resp.Header.Get("Content-Encoding"))
+		providerReqID, completion := extractResponseMetadata(model, reqType, decoded, stream || isEventStream)
+		if providerReqID != "" {
+			record.ProviderRequestID = providerReqID
+		}
+		if completion > 0 {
+			record.ResponseTokens = completion
 		}
 	}
 
-	return responseRecord, nil
+	return record, nil
 }
 
 func shouldRetryStatus(status int) bool {
 	return status >= 400
+}
+
+type firstByteReader struct {
+	reader    io.Reader
+	started   time.Time
+	firstRead time.Time
+}
+
+func newFirstByteReader(r io.Reader, started time.Time) *firstByteReader {
+	if started.IsZero() {
+		started = time.Now()
+	}
+	return &firstByteReader{reader: r, started: started}
+}
+
+func (r *firstByteReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 && r.firstRead.IsZero() {
+		r.firstRead = time.Now()
+	}
+	return n, err
+}
+
+func (r *firstByteReader) Latency() time.Duration {
+	if r.firstRead.IsZero() {
+		return 0
+	}
+	return r.firstRead.Sub(r.started)
+}
+
+func isEventStreamResponse(header http.Header) bool {
+	contentType := strings.ToLower(header.Get("Content-Type"))
+	return strings.Contains(contentType, "text/event-stream")
+}
+
+func decodeBodyForAnalysis(data []byte, encoding string) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	if strings.Contains(strings.ToLower(encoding), "gzip") {
+		if decoded, err := decodeGzip(data); err == nil {
+			return decoded
+		}
+	}
+	return data
+}
+
+func extractErrorMessage(body []byte, encoding string, status int) string {
+	decoded := decodeBodyForAnalysis(body, encoding)
+	if trimmed := strings.TrimSpace(string(decoded)); trimmed != "" {
+		return trimmed
+	}
+	if status > 0 {
+		if text := http.StatusText(status); text != "" {
+			return text
+		}
+		return fmt.Sprintf("status %d", status)
+	}
+	if len(body) > 0 {
+		return string(body)
+	}
+	return "request failed"
+}
+
+func shortenErrorMessage(msg string) string {
+	const maxRunes = 512
+	runes := []rune(msg)
+	if len(runes) <= maxRunes {
+		return msg
+	}
+	return string(runes[:maxRunes])
+}
+
+func extractResponseMetadata(model string, reqType RequestType, body []byte, isStream bool) (string, int) {
+	if len(body) == 0 {
+		return "", 0
+	}
+	encoding, err := tiktoken.EncodingForModel(model)
+	if err != nil {
+		encoding, err = tiktoken.GetEncoding("cl100k_base")
+		if err != nil {
+			return "", 0
+		}
+	}
+
+	texts, providerID := extractResponseTexts(reqType, isStream, body)
+	if len(texts) == 0 {
+		return providerID, 0
+	}
+	total := 0
+	for _, txt := range texts {
+		total += tokenLen(encoding, txt)
+	}
+	return providerID, total
+}
+
+func extractResponseTexts(reqType RequestType, isStream bool, body []byte) ([]string, string) {
+	switch reqType {
+	case RequestTypeChatCompletions:
+		if isStream {
+			return extractChatStreamTexts(body)
+		}
+		return extractChatResponseTexts(body)
+	case RequestTypeResponses:
+		if isStream {
+			return extractResponsesStreamTexts(body)
+		}
+		return extractResponsesTexts(body)
+	case RequestTypeAnthropicMessages:
+		if isStream {
+			return extractAnthropicStreamTexts(body)
+		}
+		return extractAnthropicTexts(body)
+	default:
+		return nil, ""
+	}
+}
+
+func extractChatResponseTexts(body []byte) ([]string, string) {
+	providerID := gjson.GetBytes(body, "id").String()
+	choices := gjson.GetBytes(body, "choices")
+	texts := make([]string, 0)
+	if choices.Exists() {
+		choices.ForEach(func(_, choice gjson.Result) bool {
+			var builder strings.Builder
+			gatherText(&builder, choice.Get("message.content"))
+			gatherText(&builder, choice.Get("content"))
+			gatherText(&builder, choice.Get("text"))
+			if out := strings.TrimSpace(builder.String()); out != "" {
+				texts = append(texts, out)
+			}
+			return true
+		})
+	}
+	return texts, providerID
+}
+
+func extractChatStreamTexts(body []byte) ([]string, string) {
+	payloads := parseSSEPayloads(body)
+	if len(payloads) == 0 {
+		return nil, ""
+	}
+	builders := make(map[int]*strings.Builder)
+	providerID := ""
+	for _, payload := range payloads {
+		res := gjson.ParseBytes(payload)
+		if providerID == "" {
+			providerID = res.Get("id").String()
+			if providerID == "" {
+				providerID = res.Get("response.id").String()
+			}
+		}
+		res.Get("choices").ForEach(func(_, choice gjson.Result) bool {
+			idx := int(choice.Get("index").Int())
+			builder := builders[idx]
+			if builder == nil {
+				builder = &strings.Builder{}
+				builders[idx] = builder
+			}
+			gatherText(builder, choice.Get("delta"))
+			gatherText(builder, choice.Get("message"))
+			gatherText(builder, choice.Get("content"))
+			gatherText(builder, choice.Get("text"))
+			return true
+		})
+	}
+	return buildersToSlice(builders), providerID
+}
+
+func extractResponsesTexts(body []byte) ([]string, string) {
+	providerID := gjson.GetBytes(body, "id").String()
+	texts := make([]string, 0)
+	outputText := gjson.GetBytes(body, "output_text")
+	if outputText.Exists() {
+		if outputText.IsArray() {
+			outputText.ForEach(func(_, item gjson.Result) bool {
+				if item.Type == gjson.String {
+					texts = append(texts, item.String())
+				}
+				return true
+			})
+		} else if outputText.Type == gjson.String {
+			texts = append(texts, outputText.String())
+		}
+	}
+	gjson.GetBytes(body, "output").ForEach(func(_, output gjson.Result) bool {
+		var builder strings.Builder
+		gatherText(&builder, output.Get("content"))
+		if out := strings.TrimSpace(builder.String()); out != "" {
+			texts = append(texts, out)
+		}
+		return true
+	})
+	return texts, providerID
+}
+
+func extractResponsesStreamTexts(body []byte) ([]string, string) {
+	payloads := parseSSEPayloads(body)
+	if len(payloads) == 0 {
+		return nil, ""
+	}
+	builders := make(map[int]*strings.Builder)
+	providerID := ""
+	for _, payload := range payloads {
+		res := gjson.ParseBytes(payload)
+		if providerID == "" {
+			providerID = res.Get("id").String()
+			if providerID == "" {
+				providerID = res.Get("response.id").String()
+			}
+		}
+		idx := int(res.Get("index").Int())
+		builder := builders[idx]
+		if builder == nil {
+			builder = &strings.Builder{}
+			builders[idx] = builder
+		}
+		gatherText(builder, res.Get("delta"))
+		gatherText(builder, res.Get("text"))
+		gatherText(builder, res.Get("output_text"))
+		gatherText(builder, res.Get("content"))
+	}
+	return buildersToSlice(builders), providerID
+}
+
+func extractAnthropicTexts(body []byte) ([]string, string) {
+	providerID := gjson.GetBytes(body, "id").String()
+	var builder strings.Builder
+	gatherText(&builder, gjson.GetBytes(body, "content"))
+	text := strings.TrimSpace(builder.String())
+	if text == "" {
+		return nil, providerID
+	}
+	return []string{text}, providerID
+}
+
+func extractAnthropicStreamTexts(body []byte) ([]string, string) {
+	payloads := parseSSEPayloads(body)
+	if len(payloads) == 0 {
+		return nil, ""
+	}
+	var builder strings.Builder
+	providerID := ""
+	for _, payload := range payloads {
+		res := gjson.ParseBytes(payload)
+		if providerID == "" {
+			providerID = res.Get("id").String()
+			if providerID == "" {
+				providerID = res.Get("message.id").String()
+			}
+		}
+		typ := res.Get("type").String()
+		switch typ {
+		case "message_start", "message_delta", "content_block_delta", "content_block_start", "message_stop", "content_block_stop", "":
+			gatherText(&builder, res)
+		}
+	}
+	text := strings.TrimSpace(builder.String())
+	if text == "" {
+		return nil, providerID
+	}
+	return []string{text}, providerID
+}
+
+func gatherText(builder *strings.Builder, node gjson.Result) {
+	if !node.Exists() {
+		return
+	}
+	if node.Type == gjson.String {
+		builder.WriteString(node.String())
+		return
+	}
+	if node.IsArray() {
+		node.ForEach(func(_, item gjson.Result) bool {
+			gatherText(builder, item)
+			return true
+		})
+		return
+	}
+	keys := []string{"text", "content", "delta", "value"}
+	for _, key := range keys {
+		child := node.Get(key)
+		if child.Exists() {
+			gatherText(builder, child)
+		}
+	}
+}
+
+func buildersToSlice(builders map[int]*strings.Builder) []string {
+	if len(builders) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(builders))
+	for idx := range builders {
+		indexes = append(indexes, idx)
+	}
+	sort.Ints(indexes)
+	texts := make([]string, 0, len(indexes))
+	for _, idx := range indexes {
+		builder := builders[idx]
+		if builder == nil {
+			continue
+		}
+		if text := strings.TrimSpace(builder.String()); text != "" {
+			texts = append(texts, text)
+		}
+	}
+	return texts
+}
+
+func parseSSEPayloads(body []byte) [][]byte {
+	lines := bytes.Split(body, []byte("\n"))
+	payloads := make([][]byte, 0)
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
 }
 
 func (g *Gateway) selectProviders(route *modelRoute, model string, tokenCount int, path string) []ruleProvider {
