@@ -185,7 +185,7 @@
         e('span', {
           style: {
             fontSize: '0.85em',
-            color: '#d5d8dc',
+            color: '#475569',
             wordBreak: 'break-word',
             ...style,
           },
@@ -195,7 +195,7 @@
         e('span', {
           style: {
             fontSize: '0.95em',
-            color: '#ecf0f1',
+            color: '#0f172a',
             fontWeight: 500,
             wordBreak: 'break-word',
             ...style,
@@ -219,7 +219,7 @@
         }
         const isSuccess = computedStatus === 'success';
         const isFailure = computedStatus === 'failure';
-        const statusColor = isSuccess ? '#58d68d' : isFailure ? '#f1948a' : '#bdc3c7';
+  const statusColor = isSuccess ? '#16a34a' : isFailure ? '#dc2626' : '#64748b';
         const statusLabel = statusCode ? `${statusCode}${attempt ? ` (#${attempt})` : ''}` : attempt ? `#${attempt}` : '-';
 
         const highlight = Boolean(requestIdFilter && requestId && requestIdFilter === requestId);
@@ -234,7 +234,7 @@
                 style: {
                   background: 'none',
                   border: 'none',
-                  color: '#5dade2',
+                  color: '#0ea5a3',
                   cursor: 'pointer',
                   padding: 0,
                   fontSize: '0.85em',
@@ -277,7 +277,7 @@
           'tr',
           {
             key: rowKey,
-            style: highlight ? { backgroundColor: 'rgba(90, 160, 255, 0.08)' } : undefined,
+            style: highlight ? { backgroundColor: 'rgba(16, 185, 129, 0.08)' } : undefined,
           },
           e(
             'td',
@@ -292,7 +292,7 @@
             null,
             stack([
               strong(item.original_model || '-'),
-              text(item.model ? `→ ${item.model}` : '→ -', { color: '#95a5a6' }),
+              text(item.model ? `→ ${item.model}` : '→ -', { color: '#94a3b8' }),
             ])
           ),
           e(
@@ -312,7 +312,7 @@
             null,
             stack([
               statusContent,
-              !isSuccess && !isFailure && computedStatus ? text(computedStatus, { color: '#bdc3c7' }) : null,
+              !isSuccess && !isFailure && computedStatus ? text(computedStatus, { color: '#94a3b8' }) : null,
             ])
           ),
           e(
@@ -320,7 +320,7 @@
             null,
             stack([
               strong(firstLatency),
-              text(totalLatency, { color: '#95a5a6' }),
+              text(totalLatency, { color: '#64748b' }),
             ])
           )
         );
@@ -431,10 +431,10 @@
                   onClick: () => setRequestIdFilter(''),
                   style: {
                     background: 'none',
-                    border: '1px solid rgba(255, 255, 255, 0.2)',
-                    color: '#ec7063',
+                    border: '1px solid #e2e8f0',
+                    color: '#0f766e',
                     padding: '4px 8px',
-                    borderRadius: '4px',
+                    borderRadius: '6px',
                     cursor: 'pointer',
                   },
                 },

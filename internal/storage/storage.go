@@ -45,6 +45,7 @@ type UsageQuery struct {
 type Store interface {
 	RecordUsage(ctx context.Context, record UsageRecord) error
 	QueryUsage(ctx context.Context, query UsageQuery) ([]UsageRecord, error)
+	CleanupOldRecords(ctx context.Context, retentionDays int) (int64, error)
 	Close(ctx context.Context) error
 }
 
@@ -255,6 +256,30 @@ func (s *sqliteStore) QueryUsage(ctx context.Context, query UsageQuery) ([]Usage
 	}
 
 	return records, nil
+}
+
+func (s *sqliteStore) CleanupOldRecords(ctx context.Context, retentionDays int) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Calculate the cutoff time
+	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
+
+	// Delete records older than the cutoff time
+	query := `DELETE FROM usage_records WHERE datetime(created_at) < datetime(?)`
+	result, err := s.db.ExecContext(ctx, query, cutoffTime.Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("cleanup old records: %w", err)
+	}
+
+	// Get the number of affected rows
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("get rows affected: %w", err)
+	}
+
+	return rowsAffected, nil
 }
 
 func (s *sqliteStore) Close(ctx context.Context) error {
@@ -474,6 +499,47 @@ func (f *fileStore) QueryUsage(_ context.Context, query UsageQuery) ([]UsageReco
 		records = records[:limit]
 	}
 	return records, nil
+}
+
+func (f *fileStore) CleanupOldRecords(ctx context.Context, retentionDays int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// Calculate the cutoff time
+	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
+
+	// Filter records to keep only those within retention period
+	var keptRecords []UsageRecord
+	var removedCount int64
+
+	for _, record := range f.records {
+		if record.CreatedAt.After(cutoffTime) {
+			keptRecords = append(keptRecords, record)
+		} else {
+			removedCount++
+		}
+	}
+
+	f.records = keptRecords
+
+	// Save the updated records to file by rewriting the entire file
+	file, err := os.OpenFile(f.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, fmt.Errorf("open usage file for cleanup: %w", err)
+	}
+	defer file.Close()
+
+	for _, record := range f.records {
+		data, err := json.Marshal(record)
+		if err != nil {
+			return 0, fmt.Errorf("encode usage record during cleanup: %w", err)
+		}
+		if _, err := file.Write(append(data, '\n')); err != nil {
+			return 0, fmt.Errorf("write usage record during cleanup: %w", err)
+		}
+	}
+
+	return removedCount, nil
 }
 
 func (f *fileStore) Close(ctx context.Context) error {

@@ -18,15 +18,19 @@ const (
 )
 
 type Config struct {
-	Listen      string           `json:"listen" yaml:"listen"`
-	APIKeys     []string         `json:"api_keys" yaml:"api_keys"`
-	Providers   []ProviderConfig `json:"providers" yaml:"providers"`
-	Models      []ModelConfig    `json:"models" yaml:"models"`
-	Default     string           `json:"default_provider" yaml:"default_provider"`
-	Debug       bool             `json:"debug" yaml:"debug"`
-	SaveUsage   bool             `json:"save_usage" yaml:"save_usage"`
-	StorageType string           `json:"storage_type" yaml:"storage_type"`
-	StorageURI  string           `json:"storage_uri" yaml:"storage_uri"`
+	Listen         string           `json:"listen" yaml:"listen"`
+	APIKeys        []string         `json:"api_keys" yaml:"api_keys"`
+	Providers      []ProviderConfig `json:"providers" yaml:"providers"`
+	Models         []ModelConfig    `json:"models" yaml:"models"`
+	Default        string           `json:"default_provider" yaml:"default_provider"`
+	Debug          bool             `json:"debug" yaml:"debug"`
+	SaveUsage      bool             `json:"save_usage" yaml:"save_usage"`
+	StorageType    string           `json:"storage_type" yaml:"storage_type"`
+	StorageURI     string           `json:"storage_uri" yaml:"storage_uri"`
+	RetentionDays  int              `json:"retention_days" yaml:"retention_days"`
+	CleanupEnabled bool             `json:"cleanup_enabled" yaml:"cleanup_enabled"`
+	// CleanupIntervalHours controls how often the background cleanup runs; defaults to 6 if not set or <= 0
+	CleanupIntervalHours int `json:"cleanup_interval_hours" yaml:"cleanup_interval_hours"`
 }
 
 type ProviderConfig struct {

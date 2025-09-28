@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,17 @@ import (
 	internalmw "github.com/mylxsw/openai-cost-optimal-gateway/internal/middleware"
 	"github.com/mylxsw/openai-cost-optimal-gateway/internal/storage"
 )
+
+// getEnv fetches environment variable value; returns empty string if not set.
+func getEnv(key string) string {
+	if v, ok := lookupEnv(key); ok {
+		return v
+	}
+	return ""
+}
+
+// lookupEnv allows us to patch during tests if needed.
+var lookupEnv = func(key string) (string, bool) { return os.LookupEnv(key) }
 
 type Server struct {
 	cfg     *config.Config
@@ -34,10 +46,33 @@ func New(cfg *config.Config, gw *gateway.Gateway, usage storage.Store) *Server {
 
 func (s *Server) Run(ctx context.Context) error {
 	handler := s.buildHandler()
+	// allow PORT env var to override the listen port, common for cloud envs
+	listen := s.cfg.Listen
+	if port := strings.TrimSpace(getEnv("PORT")); port != "" {
+		// if listen is host:port, replace port; if only port provided in env, use :PORT
+		if strings.Contains(listen, ":") {
+			parts := strings.Split(listen, ":")
+			// join all but last as host
+			host := strings.Join(parts[:len(parts)-1], ":")
+			if host == "" {
+				listen = ":" + port
+			} else {
+				listen = host + ":" + port
+			}
+		} else {
+			listen = ":" + port
+		}
+		log.Infof("PORT env detected, overriding listen to %s", listen)
+	}
 	s.httpSrv = &http.Server{
-		Addr:              s.cfg.Listen,
+		Addr:              listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
+	}
+
+	// Start cleanup goroutine if usage tracking and cleanup are enabled
+	if s.cfg.SaveUsage && s.usage != nil && s.cfg.CleanupEnabled {
+		go s.startCleanupTask(ctx)
 	}
 
 	go func() {
@@ -49,7 +84,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	log.Infof("listening on %s", s.cfg.Listen)
+	log.Infof("listening on %s", listen)
 	err := s.httpSrv.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil
@@ -227,4 +262,56 @@ func recoverMiddleware(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) startCleanupTask(ctx context.Context) {
+	// Get retention period from config, default to 3 days
+	retentionDays := s.cfg.RetentionDays
+	if retentionDays <= 0 {
+		retentionDays = 3
+	}
+
+	// Cleanup interval: default every 6 hours, configurable via config
+	intervalHours := s.cfg.CleanupIntervalHours
+	if intervalHours <= 0 {
+		intervalHours = 6
+	}
+	interval := time.Duration(intervalHours) * time.Hour
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	log.Infof("usage records cleanup task started: retention=%d days, interval=%dh", retentionDays, intervalHours)
+
+	// Run cleanup immediately on startup
+	s.performCleanup(ctx, retentionDays)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Infof("cleanup task stopped")
+			return
+		case <-ticker.C:
+			s.performCleanup(ctx, retentionDays)
+		}
+	}
+}
+
+func (s *Server) performCleanup(ctx context.Context, retentionDays int) {
+	if s.usage == nil {
+		return
+	}
+
+	log.Infof("starting cleanup of usage records older than %d days", retentionDays)
+
+	deleted, err := s.usage.CleanupOldRecords(ctx, retentionDays)
+	if err != nil {
+		log.Errorf("cleanup old records failed: %v", err)
+		return
+	}
+
+	if deleted > 0 {
+		log.Infof("cleanup completed: deleted %d old usage records", deleted)
+	} else {
+		log.Debugf("cleanup completed: no old records to delete")
+	}
 }
