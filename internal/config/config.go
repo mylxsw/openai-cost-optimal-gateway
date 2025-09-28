@@ -18,12 +18,19 @@ const (
 )
 
 type Config struct {
-	Listen    string           `json:"listen" yaml:"listen"`
-	APIKeys   []string         `json:"api_keys" yaml:"api_keys"`
-	Providers []ProviderConfig `json:"providers" yaml:"providers"`
-	Models    []ModelConfig    `json:"models" yaml:"models"`
-	Default   string           `json:"default_provider" yaml:"default_provider"`
-	Debug     bool             `json:"debug" yaml:"debug"`
+	Listen         string           `json:"listen" yaml:"listen"`
+	APIKeys        []string         `json:"api_keys" yaml:"api_keys"`
+	Providers      []ProviderConfig `json:"providers" yaml:"providers"`
+	Models         []ModelConfig    `json:"models" yaml:"models"`
+	Default        string           `json:"default_provider" yaml:"default_provider"`
+	Debug          bool             `json:"debug" yaml:"debug"`
+	SaveUsage      bool             `json:"save_usage" yaml:"save_usage"`
+	StorageType    string           `json:"storage_type" yaml:"storage_type"`
+	StorageURI     string           `json:"storage_uri" yaml:"storage_uri"`
+	RetentionDays  int              `json:"retention_days" yaml:"retention_days"`
+	CleanupEnabled bool             `json:"cleanup_enabled" yaml:"cleanup_enabled"`
+	// CleanupIntervalHours controls how often the background cleanup runs; defaults to 6 if not set or <= 0
+	CleanupIntervalHours int `json:"cleanup_interval_hours" yaml:"cleanup_interval_hours"`
 }
 
 type ProviderConfig struct {
@@ -85,6 +92,13 @@ func (c *Config) setDefaults() {
 		if c.Providers[i].Type == "" {
 			c.Providers[i].Type = ProviderTypeOpenAI
 		}
+	}
+
+	if c.StorageType == "" {
+		c.StorageType = "sqlite"
+	}
+	if c.StorageURI == "" {
+		c.StorageURI = "file:usage.db?_pragma=busy_timeout=5000&_pragma=journal_mode=WAL"
 	}
 }
 
@@ -149,6 +163,15 @@ func (c *Config) Validate() error {
 	if c.Default != "" {
 		if _, ok := providers[c.Default]; !ok {
 			return fmt.Errorf("default provider %s not found", c.Default)
+		}
+	}
+
+	if c.SaveUsage {
+		if c.StorageType != "sqlite" && c.StorageType != "mysql" {
+			return fmt.Errorf("unsupported storage_type %s", c.StorageType)
+		}
+		if strings.TrimSpace(c.StorageURI) == "" {
+			return fmt.Errorf("storage_uri is required when save_usage is enabled")
 		}
 	}
 

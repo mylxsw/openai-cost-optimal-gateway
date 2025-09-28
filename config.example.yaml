@@ -6,6 +6,12 @@
 listen: 0.0.0.0:8000
 debug: true
 default_provider: openai-official
+save_usage: true
+storage_type: sqlite
+storage_uri: file:usage.db?_pragma=busy_timeout=5000&_pragma=journal_mode=WAL
+cleanup_enabled: true
+retention_days: 3
+cleanup_interval_hours: 6
 
 api_keys:
   - sk-admin-gateway-key
