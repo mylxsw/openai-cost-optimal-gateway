@@ -93,6 +93,8 @@ func (c *Config) setDefaults() {
 			c.Providers[i].Type = ProviderTypeOpenAI
 			if c.Providers[i].Timeout <= 0 {
 				c.Providers[i].Timeout = 10 * time.Minute
+			} else {
+				c.Providers[i].Timeout = c.Providers[i].Timeout * time.Second
 			}
 		}
 	}
