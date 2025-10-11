@@ -67,7 +67,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.httpSrv = &http.Server{
 		Addr:              listen,
 		Handler:           handler,
-		ReadHeaderTimeout: 15 * time.Second,
+		ReadHeaderTimeout: 60 * time.Second,
 	}
 
 	// Start cleanup goroutine if usage tracking and cleanup are enabled

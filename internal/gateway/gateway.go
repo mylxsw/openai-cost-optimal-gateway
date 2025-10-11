@@ -82,7 +82,7 @@ func New(cfg *config.Config, usageStore storage.Store) (*Gateway, error) {
 		cfg:        cfg,
 		providers:  make(map[string]config.ProviderConfig),
 		models:     make(map[string]*modelRoute),
-		httpClient: &http.Client{Timeout: 2 * time.Minute},
+		httpClient: &http.Client{Timeout: 30 * time.Minute},
 		usageStore: usageStore,
 	}
 
