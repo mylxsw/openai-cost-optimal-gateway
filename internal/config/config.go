@@ -91,6 +91,9 @@ func (c *Config) setDefaults() {
 	for i := range c.Providers {
 		if c.Providers[i].Type == "" {
 			c.Providers[i].Type = ProviderTypeOpenAI
+			if c.Providers[i].Timeout <= 0 {
+				c.Providers[i].Timeout = 10 * time.Minute
+			}
 		}
 	}
 
