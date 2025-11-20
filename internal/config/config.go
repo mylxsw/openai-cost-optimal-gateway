@@ -30,7 +30,13 @@ type Config struct {
 	RetentionDays  int              `json:"retention_days" yaml:"retention_days"`
 	CleanupEnabled bool             `json:"cleanup_enabled" yaml:"cleanup_enabled"`
 	// CleanupIntervalHours controls how often the background cleanup runs; defaults to 6 if not set or <= 0
-	CleanupIntervalHours int `json:"cleanup_interval_hours" yaml:"cleanup_interval_hours"`
+	CleanupIntervalHours int           `json:"cleanup_interval_hours" yaml:"cleanup_interval_hours"`
+	Alias                []AliasConfig `json:"alias" yaml:"alias"`
+}
+
+type AliasConfig struct {
+	Model  string `json:"model" yaml:"model"`
+	Target string `json:"target" yaml:"target"`
 }
 
 type ProviderConfig struct {
@@ -178,6 +184,19 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(c.StorageURI) == "" {
 			return fmt.Errorf("storage_uri is required when save_usage is enabled")
 		}
+	}
+
+	for _, alias := range c.Alias {
+		if alias.Model == "" {
+			return fmt.Errorf("alias model is required")
+		}
+		if alias.Target == "" {
+			return fmt.Errorf("alias target is required")
+		}
+		// We don't strictly validate that the target exists in Models here,
+		// because it might be useful to alias to a model that is provided by a default provider
+		// or handled dynamically. However, typically it should exist.
+		// For now, let's just ensure it's not empty.
 	}
 
 	return nil

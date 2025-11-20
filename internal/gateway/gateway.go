@@ -42,6 +42,7 @@ type Gateway struct {
 	modelList       []ModelInfo
 	defaultProvider *config.ProviderConfig
 	usageStore      storage.Store
+	aliases         map[string]string
 }
 
 type modelRoute struct {
@@ -84,6 +85,7 @@ func New(cfg *config.Config, usageStore storage.Store) (*Gateway, error) {
 		models:     make(map[string]*modelRoute),
 		httpClient: &http.Client{Timeout: 30 * time.Minute},
 		usageStore: usageStore,
+		aliases:    make(map[string]string),
 	}
 
 	for _, p := range cfg.Providers {
@@ -114,6 +116,15 @@ func New(cfg *config.Config, usageStore storage.Store) (*Gateway, error) {
 		gw.models[m.Name] = mr
 		gw.modelList = append(gw.modelList, ModelInfo{
 			ID:      m.Name,
+			Object:  "model",
+			Created: created,
+			OwnedBy: "openai-cost-optimal-gateway",
+		})
+	}
+	for _, alias := range cfg.Alias {
+		gw.aliases[alias.Model] = alias.Target
+		gw.modelList = append(gw.modelList, ModelInfo{
+			ID:      alias.Model,
 			Object:  "model",
 			Created: created,
 			OwnedBy: "openai-cost-optimal-gateway",
@@ -176,6 +187,19 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 	if modelName == "" {
 		http.Error(w, "model is required", http.StatusBadRequest)
 		return
+	}
+
+	if target, ok := g.aliases[modelName]; ok {
+		if log.DebugEnabled() {
+			log.Debugf("alias match: %s -> %s", modelName, target)
+		}
+		modelName = target
+		// We need to update the model in the request body so that the provider knows the correct model
+		bodyBytes, err = sjson.SetBytes(bodyBytes, "model", modelName)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("update model in request body: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	tokenCount := CountTokens(modelName, reqType, bodyBytes)
