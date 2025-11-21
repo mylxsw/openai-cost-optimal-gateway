@@ -574,6 +574,11 @@ func extractResponseMetadata(model string, reqType RequestType, body []byte, isS
 	if len(body) == 0 {
 		return "", 0
 	}
+
+	if pid, usage := extractTokenUsage(reqType, isStream, body); usage > 0 {
+		return pid, usage
+	}
+
 	encoding, err := tiktoken.EncodingForModel(model)
 	if err != nil {
 		encoding, err = tiktoken.GetEncoding("cl100k_base")
@@ -1086,4 +1091,100 @@ func tokenLen(enc *tiktoken.Tiktoken, text string) int {
 	}
 	tokens := enc.Encode(text, nil, nil)
 	return len(tokens)
+}
+
+func extractTokenUsage(reqType RequestType, isStream bool, body []byte) (string, int) {
+	switch reqType {
+	case RequestTypeChatCompletions:
+		if isStream {
+			return extractChatStreamUsage(body)
+		}
+		return extractChatUsage(body)
+	case RequestTypeResponses:
+		if isStream {
+			return extractResponsesStreamUsage(body)
+		}
+		return extractResponsesUsage(body)
+	case RequestTypeAnthropicMessages:
+		if isStream {
+			return extractAnthropicStreamUsage(body)
+		}
+		return extractAnthropicUsage(body)
+	}
+	return "", 0
+}
+
+func extractChatUsage(body []byte) (string, int) {
+	providerID := gjson.GetBytes(body, "id").String()
+	usage := int(gjson.GetBytes(body, "usage.completion_tokens").Int())
+	return providerID, usage
+}
+
+func extractChatStreamUsage(body []byte) (string, int) {
+	payloads := parseSSEPayloads(body)
+	providerID := ""
+	usage := 0
+	for _, payload := range payloads {
+		res := gjson.ParseBytes(payload)
+		if providerID == "" {
+			providerID = res.Get("id").String()
+			if providerID == "" {
+				providerID = res.Get("response.id").String()
+			}
+		}
+		if u := res.Get("usage.completion_tokens").Int(); u > 0 {
+			usage = int(u)
+		}
+	}
+	return providerID, usage
+}
+
+func extractResponsesUsage(body []byte) (string, int) {
+	providerID := gjson.GetBytes(body, "id").String()
+	usage := int(gjson.GetBytes(body, "usageMetadata.candidatesTokenCount").Int())
+	return providerID, usage
+}
+
+func extractResponsesStreamUsage(body []byte) (string, int) {
+	payloads := parseSSEPayloads(body)
+	providerID := ""
+	usage := 0
+	for _, payload := range payloads {
+		res := gjson.ParseBytes(payload)
+		if providerID == "" {
+			providerID = res.Get("id").String()
+			if providerID == "" {
+				providerID = res.Get("response.id").String()
+			}
+		}
+		if u := res.Get("usageMetadata.candidatesTokenCount").Int(); u > 0 {
+			usage = int(u)
+		}
+	}
+	return providerID, usage
+}
+
+func extractAnthropicUsage(body []byte) (string, int) {
+	providerID := gjson.GetBytes(body, "id").String()
+	usage := int(gjson.GetBytes(body, "usage.output_tokens").Int())
+	return providerID, usage
+}
+
+func extractAnthropicStreamUsage(body []byte) (string, int) {
+	payloads := parseSSEPayloads(body)
+	providerID := ""
+	usage := 0
+	for _, payload := range payloads {
+		res := gjson.ParseBytes(payload)
+		if providerID == "" {
+			providerID = res.Get("message.id").String()
+		}
+		if u := res.Get("message.usage.output_tokens").Int(); u > 0 {
+			usage += int(u)
+		}
+		if u := res.Get("usage.output_tokens").Int(); u > 0 {
+			usage += int(u)
+		}
+	}
+	return providerID, usage
 }
