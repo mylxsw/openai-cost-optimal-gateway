@@ -208,6 +208,8 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, reqType RequestT
 		requestID = uuid.NewString()
 	}
 
+	g.saveRequestLog(r.Context(), r, bodyBytes, requestID)
+
 	route, ok := g.models[modelName]
 	if !ok {
 		if g.defaultProvider != nil {

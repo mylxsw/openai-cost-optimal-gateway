@@ -91,6 +91,10 @@
     const [error, setError] = useState('');
     const [lastUpdated, setLastUpdated] = useState(null);
     const [requestIdFilter, setRequestIdFilter] = useState('');
+    const [requestDetail, setRequestDetail] = useState(null);
+    const [detailError, setDetailError] = useState('');
+    const [detailLoading, setDetailLoading] = useState(false);
+    const [activeRequestId, setActiveRequestId] = useState('');
 
     useEffect(() => {
       if (apiKey) {
@@ -144,6 +148,53 @@
         .finally(() => setLoading(false));
     }, [apiKey, limit, requestIdFilter]);
 
+    const fetchRequestDetail = useCallback((requestId) => {
+      const trimmed = (requestId || '').trim();
+      if (!trimmed) {
+        setDetailError('缺少请求 ID');
+        setDetailLoading(false);
+        setActiveRequestId('');
+        return;
+      }
+      setActiveRequestId(trimmed);
+      setRequestDetail(null);
+      setDetailError('');
+      setDetailLoading(true);
+      if (!apiKey) {
+        setDetailError('请先填写 API Key');
+        setDetailLoading(false);
+        return;
+      }
+      fetch(`/usage/request_detail?request_id=${encodeURIComponent(trimmed)}`, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+      })
+        .then((res) => {
+          if (res.status === 404) {
+            throw new Error('未找到该请求的详情');
+          }
+          if (!res.ok) {
+            throw new Error(`请求失败：${res.status}`);
+          }
+          return res.json();
+        })
+        .then((data) => {
+          setRequestDetail(data || null);
+        })
+        .catch((err) => {
+          setDetailError(err.message || '获取请求详情失败');
+        })
+        .finally(() => setDetailLoading(false));
+    }, [apiKey]);
+
+    const closeDetail = useCallback(() => {
+      setRequestDetail(null);
+      setDetailError('');
+      setDetailLoading(false);
+      setActiveRequestId('');
+    }, []);
+
     useEffect(() => {
       fetchUsage();
       if (!apiKey) {
@@ -154,7 +205,7 @@
     }, [fetchUsage, apiKey]);
 
     const rows = useMemo(() => {
-      const columnCount = 7;
+      const columnCount = 6;
       if (!records.length) {
         return e(
           'tr',
@@ -224,6 +275,24 @@
 
         const highlight = Boolean(requestIdFilter && requestId && requestIdFilter === requestId);
         const rowKey = item.id || `${requestId || 'req'}-${item.created_at || ''}-${item.provider || ''}-${item.model || ''}-${attempt || 0}`;
+        const openDetail = () => {
+          fetchRequestDetail(requestId);
+        };
+
+        const viewButton = e(
+          'button',
+          {
+            type: 'button',
+            className: 'icon-button',
+            onClick: (evt) => {
+              evt.stopPropagation();
+              openDetail();
+            },
+            disabled: !requestId || detailLoading,
+            title: requestId ? '查看请求详情' : '无请求 ID',
+          },
+          requestId && activeRequestId === requestId && detailLoading ? '…' : '👁'
+        );
 
         const requestNode = requestId
           ? e(
@@ -283,7 +352,12 @@
             'td',
             null,
             stack([
-              strong(createdText),
+              e(
+                'div',
+                { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+                strong(createdText),
+                viewButton
+              ),
               requestNode,
             ])
           ),
@@ -325,7 +399,32 @@
           )
         );
       });
-    }, [records, requestIdFilter]);
+    }, [records, requestIdFilter, fetchRequestDetail, detailLoading, activeRequestId]);
+
+    const formattedBody = useMemo(() => {
+      if (!requestDetail || requestDetail.body === undefined || requestDetail.body === null) {
+        return '';
+      }
+      try {
+        return JSON.stringify(JSON.parse(requestDetail.body), null, 2);
+      } catch (err) {
+        return String(requestDetail.body);
+      }
+    }, [requestDetail]);
+
+    const headerTags = useMemo(() => {
+      if (!requestDetail || !requestDetail.headers) {
+        return [];
+      }
+      return Object.entries(requestDetail.headers).map(([key, values]) =>
+        e(
+          'span',
+          { key: key, className: 'tag' },
+          e('span', { className: 'tag-key' }, `${key}:`),
+          e('span', null, Array.isArray(values) ? values.join(', ') : String(values || ''))
+        )
+      );
+    }, [requestDetail]);
 
     const summaryCards = useMemo(() => {
       const metrics = summary || { total_requests: 0, total_prompt_tokens: 0, total_completion_tokens: 0 };
@@ -343,6 +442,9 @@
         )
       );
     }, [summary]);
+
+    const showDetailModal = Boolean(activeRequestId || requestDetail || detailError || detailLoading);
+    const modalTitle = activeRequestId ? `请求 ${activeRequestId}` : '请求详情';
 
     return e(
       'div',
@@ -470,7 +572,89 @@
           ),
           e('tbody', null, rows)
         )
-      )
+      ),
+      showDetailModal
+        ? e(
+            'div',
+            {
+              className: 'modal-backdrop',
+              onClick: (evt) => {
+                if (evt.target === evt.currentTarget) {
+                  closeDetail();
+                }
+              },
+            },
+            e(
+              'div',
+              { className: 'modal' },
+              e(
+                'div',
+                { className: 'modal-header' },
+                e('h3', { className: 'modal-title' }, modalTitle),
+                e(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+                  detailLoading ? e('span', { style: { color: '#0ea5e9' } }, '加载中...') : null,
+                  e(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'action-button secondary',
+                      onClick: closeDetail,
+                    },
+                    '关闭'
+                  )
+                )
+              ),
+              e(
+                'div',
+                { className: 'modal-body' },
+                detailError ? e('div', { className: 'error-banner' }, detailError) : null,
+                requestDetail
+                  ? e(
+                      React.Fragment,
+                      null,
+                      e(
+                        'div',
+                        { className: 'detail-group' },
+                        e('h4', null, '基础信息'),
+                        e(
+                          'p',
+                          { className: 'detail-text' },
+                          `${requestDetail.method || '-'} ${requestDetail.path || '-'}`
+                        ),
+                        e(
+                          'p',
+                          { className: 'detail-text', style: { color: '#64748b' } },
+                          requestDetail.created_at ? new Date(requestDetail.created_at).toLocaleString() : ''
+                        )
+                      ),
+                      e(
+                        'div',
+                        { className: 'detail-group' },
+                        e('h4', null, '请求头'),
+                        headerTags && headerTags.length
+                          ? e('div', null, ...headerTags)
+                          : e('p', { className: 'detail-text' }, '暂无可用的请求头')
+                      ),
+                      e(
+                        'div',
+                        { className: 'detail-group' },
+                        e('h4', null, '请求体'),
+                        e('pre', { className: 'json-block' }, formattedBody || '（空请求体）')
+                      )
+                    )
+                  : !detailError && detailLoading
+                  ? e(
+                      'div',
+                      { className: 'detail-group' },
+                      e('p', { className: 'detail-text' }, '正在加载请求详情...')
+                    )
+                  : null
+              )
+            )
+          )
+        : null
     );
   }
 

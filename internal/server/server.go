@@ -27,6 +27,8 @@ func getEnv(key string) string {
 // lookupEnv allows us to patch during tests if needed.
 var lookupEnv = func(key string) (string, bool) { return os.LookupEnv(key) }
 
+const requestLogRetentionDays = 3
+
 type Server struct {
 	cfg     *config.Config
 	gateway *gateway.Gateway
@@ -117,6 +119,7 @@ func (s *Server) buildHandler() http.Handler {
 
 	if s.cfg.SaveUsage && s.usage != nil {
 		mux.Handle("/usage", http.HandlerFunc(s.handleUsage))
+		mux.Handle("/usage/request_detail", http.HandlerFunc(s.handleRequestDetail))
 		if dashboardHandler := newDashboardHandler(); dashboardHandler != nil {
 			mux.Handle("/dashboard", dashboardHandler)
 			mux.Handle("/dashboard/", dashboardHandler)
@@ -218,6 +221,35 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(usageResponse{Data: records, Summary: summary})
 }
 
+func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
+	if s.usage == nil {
+		http.Error(w, "request log tracking disabled", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	requestID := strings.TrimSpace(r.URL.Query().Get("request_id"))
+	if requestID == "" {
+		http.Error(w, "request_id is required", http.StatusBadRequest)
+		return
+	}
+
+	logEntry, err := s.usage.GetRequestLog(r.Context(), requestID)
+	if err != nil {
+		http.Error(w, "query request log: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if logEntry == nil {
+		http.Error(w, "request not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(logEntry)
+}
+
 type usageSummary struct {
 	TotalRequests         int `json:"total_requests"`
 	TotalPromptTokens     int `json:"total_prompt_tokens"`
@@ -280,7 +312,7 @@ func (s *Server) startCleanupTask(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	log.Infof("usage records cleanup task started: retention=%d days, interval=%dh", retentionDays, intervalHours)
+	log.Infof("usage/request cleanup task started: usage_retention=%d days, request_retention=%d days, interval=%dh", retentionDays, requestLogRetentionDays, intervalHours)
 
 	// Run cleanup immediately on startup
 	s.performCleanup(ctx, retentionDays)
@@ -301,17 +333,26 @@ func (s *Server) performCleanup(ctx context.Context, retentionDays int) {
 		return
 	}
 
-	log.Infof("starting cleanup of usage records older than %d days", retentionDays)
+	log.Infof("starting cleanup of usage records older than %d days and request logs older than %d days", retentionDays, requestLogRetentionDays)
 
-	deleted, err := s.usage.CleanupOldRecords(ctx, retentionDays)
+	usageDeleted, err := s.usage.CleanupOldRecords(ctx, retentionDays)
 	if err != nil {
 		log.Errorf("cleanup old records failed: %v", err)
-		return
 	}
 
-	if deleted > 0 {
-		log.Infof("cleanup completed: deleted %d old usage records", deleted)
+	requestDeleted, reqErr := s.usage.CleanupOldRequestLogs(ctx, requestLogRetentionDays)
+	if reqErr != nil {
+		log.Errorf("cleanup old request logs failed: %v", reqErr)
+	}
+
+	if usageDeleted > 0 {
+		log.Infof("cleanup completed: deleted %d old usage records", usageDeleted)
 	} else {
-		log.Debugf("cleanup completed: no old records to delete")
+		log.Debugf("cleanup completed: no old usage records to delete")
+	}
+	if requestDeleted > 0 {
+		log.Infof("cleanup completed: deleted %d old request logs", requestDeleted)
+	} else {
+		log.Debugf("cleanup completed: no old request logs to delete")
 	}
 }
